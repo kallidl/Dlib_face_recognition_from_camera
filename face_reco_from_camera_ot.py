@@ -1,11 +1,3 @@
-# Copyright (C) 2018-2021 coneypo
-# SPDX-License-Identifier: MIT
-
-# Author:   coneypo
-# Blog:     http://www.cnblogs.com/AdaminXie
-# GitHub:   https://github.com/coneypo/Dlib_face_recognition_from_camera
-# Mail:     coneypo@foxmail.com
-
 # 利用 OT 人脸追踪, 进行人脸实时识别 / Real-time face detection and recognition via OT for multi faces
 # 检测 -> 识别人脸, 新人脸出现 -> 不需要识别, 而是利用质心追踪来判断识别结果 / Do detection -> recognize face, new face -> not do re-recognition
 # 人脸进行再识别需要花费大量时间, 这里用 OT 做跟踪 / Do re-recognition for multi faces will cost much time, OT will be used to instead it

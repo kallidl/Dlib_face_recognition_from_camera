@@ -1,11 +1,3 @@
-# Copyright (C) 2018-2021 coneypo
-# SPDX-License-Identifier: MIT
-
-# Author:   coneypo
-# Blog:     http://www.cnblogs.com/AdaminXie
-# GitHub:   https://github.com/coneypo/Dlib_face_recognition_from_camera
-# Mail:     coneypo@foxmail.com
-
 # 单张人脸实时识别 / Real-time face detection and recognition for single face
 # 检测 -> 识别人脸, 新人脸出现 -> 再识别, 不会对于每一帧都进行识别 / Do detection -> recognize face, new face -> do re-recognition
 # 其实对于单张人脸, 不需要 OT 进行跟踪, 对于新出现的人脸, 再识别一次就好了 / No OT here, OT will be used only for multi faces

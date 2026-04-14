@@ -1,11 +1,3 @@
-# Copyright (C) 2018-2021 coneypo
-# SPDX-License-Identifier: MIT
-
-# Author:   coneypo
-# Blog:     http://www.cnblogs.com/AdaminXie
-# GitHub:   https://github.com/coneypo/Dlib_face_recognition_from_camera
-# Mail:     coneypo@foxmail.com
-
 # 摄像头实时人脸识别 / Real-time face detection and recognition
 
 import dlib

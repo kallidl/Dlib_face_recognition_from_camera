@@ -1,11 +1,3 @@
-# Copyright (C) 2018-2021 coneypo
-# SPDX-License-Identifier: MIT
-
-# Author:   coneypo
-# Blog:     http://www.cnblogs.com/AdaminXie
-# GitHub:   https://github.com/coneypo/Dlib_face_recognition_from_camera
-# Mail:     coneypo@foxmail.com
-
 # 从人脸图像文件中提取人脸特征存入 "features_all.csv" / Extract features from images and save into "features_all.csv"
 
 import os
