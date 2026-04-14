@@ -9,6 +9,7 @@ import os
 import pandas as pd
 import time
 import logging
+from PIL import Image, ImageDraw, ImageFont
 
 # Dlib 正向人脸检测器 / Use frontal face detector of Dlib
 detector = dlib.get_frontal_face_detector()
@@ -23,7 +24,7 @@ face_reco_model = dlib.face_recognition_model_v1("data/data_dlib/dlib_face_recog
 class Face_Recognizer:
     def __init__(self):
         self.font = cv2.FONT_ITALIC
-
+        self.font_chinese = ImageFont.truetype("simsun.ttc", 30)
         # FPS
         self.frame_time = 0
         self.frame_start_time = 0
@@ -195,11 +196,19 @@ class Face_Recognizer:
                     if self.current_frame_face_cnt != 1:
                         self.centroid_tracker()
 
+                    # 将 OpenCV 图像(BGR)转换为 PIL 图像(RGB)
+                    img_pil = Image.fromarray(cv2.cvtColor(img_rd, cv2.COLOR_BGR2RGB))
+                    draw = ImageDraw.Draw(img_pil)
+                    
                     for i in range(self.current_frame_face_cnt):
-                        # 6.2 Write names under ROI
-                        img_rd = cv2.putText(img_rd, self.current_frame_face_name_list[i],
-                                             self.current_frame_face_position_list[i], self.font, 0.8, (0, 255, 255), 1,
-                                             cv2.LINE_AA)
+                        # 6.2 使用 PIL 写中文名字 (fill为RGB格式的黄色)
+                        draw.text(xy=self.current_frame_face_position_list[i], 
+                                  text=self.current_frame_face_name_list[i], 
+                                  font=self.font_chinese, 
+                                  fill=(255, 255, 0))
+                    
+                    # 将 PIL 图像转换回 OpenCV 图像格式
+                    img_rd = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
                     self.draw_note(img_rd)
 
                 # 6.2 如果当前帧和上一帧人脸数发生变化 / If cnt of faces changes, 0->1 or 1->0 or ...
