@@ -28,6 +28,10 @@ class Face_Register:
         self.current_face_dir = ""
         self.font = cv2.FONT_ITALIC
 
+        # 检查路径是否存在，如果不存在则先创建它
+        if not os.path.exists(self.path_photos_from_camera):
+            os.makedirs(self.path_photos_from_camera)
+
         if os.listdir(self.path_photos_from_camera):
             self.existing_faces = len(os.listdir(self.path_photos_from_camera))
 
