@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>人脸识别系统</title>
+<style>
+  :root {
+    --bg:        #070d14;
+    --bg2:       #0c1520;
+    --bg3:       #111d2b;
+    --border:    #1a2e42;
+    --accent:    #00ffa3;
+    --accent2:   #00c8ff;
+    --danger:    #ff4d6a;
+    --warn:      #ffb800;
+    --text:      #c8dce8;
+    --text-dim:  #4a6070;
+    --radius:    6px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; font-size: 13px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ── 顶栏 ── */
+  .topbar { display: flex; align-items: center; padding: 0 20px; height: 44px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; gap: 32px; }
+  .logo { font-size: 15px; font-weight: bold; letter-spacing: 3px; color: var(--accent); text-shadow: 0 0 12px var(--accent); white-space: nowrap; }
+  .nav { display: flex; gap: 4px; flex: 1; }
+  .nav-btn { padding: 6px 14px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; border-radius: var(--radius); font-family: inherit; font-size: 12px; letter-spacing: 1px; transition: all .2s; }
+  .nav-btn:hover { color: var(--text); background: var(--bg3); }
+  .nav-btn.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
+  .sys-status { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+  .dot.online { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  #clock { color: var(--text-dim); font-size: 11px; }
+
+  /* ── 主区域 ── */
+  .main { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .page { display: none; }
+  .page.active { display: block; }
+
+  /* ── 卡片 ── */
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .card-title { font-size: 11px; color: var(--accent2); letter-spacing: 2px; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+  .card-title::before { content: ''; width: 3px; height: 12px; background: var(--accent2); border-radius: 2px; }
+
+  /* ── 按钮 ── */
+  .btn { padding: 7px 16px; border: none; border-radius: var(--radius); cursor: pointer; font-family: inherit; font-size: 12px; letter-spacing: 1px; transition: all .2s; }
+  .btn-primary { background: var(--accent); color: #000; font-weight: bold; }
+  .btn-primary:hover { background: #00ffb8; box-shadow: 0 0 12px var(--accent); }
+  .btn-danger  { background: var(--danger); color: #fff; }
+  .btn-danger:hover  { background: #ff6b82; }
+  .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-outline:hover { border-color: var(--accent2); color: var(--accent2); }
+  .btn-warn    { background: var(--warn); color: #000; font-weight: bold; }
+  .btn-warn:hover { background: #ffc933; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* ── 输入框 ── */
+  input, select { background: var(--bg3); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: var(--radius); font-family: inherit; font-size: 12px; outline: none; }
+  input:focus, select:focus { border-color: var(--accent2); }
+  select option { background: var(--bg3); }
+
+  /* ── 栅格 ── */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; }
+
+  /* ── 仪表盘 ── */
+  .stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .stat-num  { font-size: 32px; font-weight: bold; color: var(--accent); line-height: 1; }
+  .stat-label{ font-size: 11px; color: var(--text-dim); margin-top: 4px; letter-spacing: 1px; }
+  .stat-card.c2 .stat-num { color: var(--accent2); }
+  .stat-card.c3 .stat-num { color: var(--warn); }
+  .stat-card.c4 .stat-num { color: #b96cff; }
+
+  /* ── 摄像头识别页 ── */
+  .cam-layout { display: grid; grid-template-columns: 1fr 300px; gap: 14px; }
+  .video-wrap { position: relative; background: #000; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; aspect-ratio: 4/3; display: flex; align-items: center; justify-content: center; }
+  .video-wrap img { width: 100%; height: 100%; object-fit: cover; }
+  .video-placeholder { text-align: center; color: var(--text-dim); }
+  .video-placeholder svg { width: 48px; height: 48px; opacity: .3; margin-bottom: 8px; }
+  .ctrl-panel { display: flex; flex-direction: column; gap: 10px; }
+  .cam-select-row { display: flex; gap: 8px; align-items: center; }
+  .cam-select-row select { flex: 1; }
+  .result-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }
+  .result-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; background: var(--bg3); border-radius: var(--radius); border-left: 3px solid var(--accent); }
+  .result-avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--accent); color: #000; font-weight: bold; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .result-name { font-size: 13px; color: var(--accent); font-weight: bold; }
+  .result-dist { font-size: 10px; color: var(--text-dim); }
+
+  /* ── 录入页 ── */
+  .reg-layout { display: grid; grid-template-columns: 1fr 340px; gap: 14px; }
+  .reg-steps { display: flex; flex-direction: column; gap: 10px; }
+  .step-row { display: flex; align-items: center; gap: 8px; }
+  .step-num { width: 22px; height: 22px; border-radius: 50%; background: var(--bg3); border: 1px solid var(--border); color: var(--text-dim); font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .step-num.done { background: var(--accent); color: #000; border-color: var(--accent); }
+  .capture-count { font-size: 28px; font-weight: bold; color: var(--accent); text-align: center; line-height: 1; }
+  .capture-label { font-size: 11px; color: var(--text-dim); text-align: center; margin-top: 2px; letter-spacing: 1px; }
+  .tip { font-size: 11px; color: var(--text-dim); padding: 6px 8px; background: var(--bg3); border-radius: var(--radius); line-height: 1.6; }
+  .tip.warn { border-left: 2px solid var(--warn); color: var(--warn); }
+  .tip.ok   { border-left: 2px solid var(--accent); color: var(--accent); }
+
+  /* ── 人员管理 ── */
+  .toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+  .search-box { flex: 1; max-width: 240px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { font-size: 11px; color: var(--text-dim); letter-spacing: 1px; padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
+  tr:hover td { background: var(--bg3); }
+  .badge { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 18px; padding: 0 6px; border-radius: 9px; font-size: 10px; font-weight: bold; background: var(--bg3); border: 1px solid var(--border); }
+  .empty-tip { text-align: center; color: var(--text-dim); padding: 32px; }
+
+  /* ── 识别记录 ── */
+  .filter-bar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+  .filter-bar input { width: 160px; }
+  .log-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: inline-block; margin-right: 6px; }
+
+  /* ── 模态框 ── */
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: none; align-items: center; justify-content: center; z-index: 999; }
+  .modal-overlay.show { display: flex; }
+  .modal { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; min-width: 320px; max-width: 480px; width: 90%; }
+  .modal h3 { font-size: 13px; color: var(--accent2); margin-bottom: 16px; letter-spacing: 1px; }
+  .form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+  .form-row label { font-size: 11px; color: var(--text-dim); }
+  .form-row input { width: 100%; }
+  .modal-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+  /* ── 通知 ── */
+  .toast-wrap { position: fixed; top: 54px; right: 16px; display: flex; flex-direction: column; gap: 6px; z-index: 1000; pointer-events: none; }
+  .toast { background: var(--bg2); border: 1px solid var(--border); padding: 8px 14px; border-radius: var(--radius); font-size: 12px; animation: fadeIn .2s; max-width: 260px; }
+  .toast.ok     { border-left: 3px solid var(--accent); color: var(--accent); }
+  .toast.err    { border-left: 3px solid var(--danger); color: var(--danger); }
+  .toast.warn   { border-left: 3px solid var(--warn); color: var(--warn); }
+  @keyframes fadeIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: none; } }
+
+  /* ── 滚动条 ── */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* 状态标签 */
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 10px; letter-spacing: 1px; }
+  .tag-on  { background: rgba(0,255,163,.15); color: var(--accent); border: 1px solid rgba(0,255,163,.3); }
+  .tag-off { background: rgba(255,77,106,.1); color: var(--danger); border: 1px solid rgba(255,77,106,.2); }
+</style>
+</head>
+<body>
+
+<!-- 顶栏 -->
+<div class="topbar">
+  <div class="logo">FACE·REC·SYS</div>
+  <nav class="nav">
+    <button class="nav-btn active" onclick="goto('dash')">仪表盘</button>
+    <button class="nav-btn" onclick="goto('cam')">摄像头识别</button>
+    <button class="nav-btn" onclick="goto('reg')">人脸录入</button>
+    <button class="nav-btn" onclick="goto('persons')">人员管理</button>
+    <button class="nav-btn" onclick="goto('logs')">识别记录</button>
+  </nav>
+  <div class="sys-status">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">离线</span>
+    <span id="clock"></span>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<!-- ══════════════════════════════════════
+     仪表盘
+══════════════════════════════════════ -->
+<div class="main page active" id="page-dash">
+  <div class="grid4" style="margin-bottom:14px">
+    <div class="stat-card">
+      <div class="stat-num" id="d-persons">—</div>
+      <div class="stat-label">已录入人员</div>
+    </div>
+    <div class="stat-card c2">
+      <div class="stat-num" id="d-today">—</div>
+      <div class="stat-label">今日识别次数</div>
+    </div>
+    <div class="stat-card c3">
+      <div class="stat-num" id="d-faces">—</div>
+      <div class="stat-label">当前画面人脸</div>
+    </div>
+    <div class="stat-card c4">
+      <div class="stat-num" id="d-features">—</div>
+      <div class="stat-label">特征库人数</div>
+    </div>
+  </div>
+  <div class="grid2">
+    <div class="card">
+      <div class="card-title">近7天识别统计</div>
+      <table>
+        <thead><tr><th>姓名</th><th>识别次数</th><th>最近识别</th></tr></thead>
+        <tbody id="dashStatsBody"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-title">系统状态</div>
+      <table>
+        <tbody>
+          <tr><td style="color:var(--text-dim)">识别摄像头</td><td id="sysReco">—</td></tr>
+          <tr><td style="color:var(--text-dim)">录入摄像头</td><td id="sysReg">—</td></tr>
+          <tr><td style="color:var(--text-dim)">特征库加载</td><td id="sysFeature">—</td></tr>
+          <tr><td style="color:var(--text-dim)">数据库连接</td><td><span class="tag tag-on">正常</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════
+     摄像头识别
+══════════════════════════════════════ -->
+<div class="main page" id="page-cam">
+  <div class="cam-layout">
+    <div>
+      <div class="video-wrap" id="camVideoWrap">
+        <div class="video-placeholder" id="camPlaceholder">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="7" width="15" height="10" rx="2"/><path d="m17 9 5-2v10l-5-2"/></svg>
+          <div>摄像头未开启</div>
+        </div>
+        <img id="camFeed" src="" style="display:none" alt="视频流">
+      </div>
+    </div>
+    <div class="ctrl-panel">
+      <div class="card">
+        <div class="card-title">摄像头控制</div>
+        <div class="cam-select-row" style="margin-bottom:10px">
+          <select id="camSelect" style="flex:1">
+            <option value="0">摄像头 0（默认）</option>
+          </select>
+          <button class="btn btn-outline" onclick="refreshCamList()" style="padding:6px 10px" title="刷新摄像头列表">↻</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button class="btn btn-primary" id="btnStart" onclick="camStart()">▶ 开启识别</button>
+          <button class="btn btn-danger"  id="btnStop"  onclick="camStop()" disabled>■ 停止识别</button>
+          <button class="btn btn-outline" onclick="reloadFeatures()">⟳ 重载人脸特征库</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">实时识别结果</div>
+        <div class="result-list" id="resultList">
+          <div style="color:var(--text-dim);font-size:11px;text-align:center;padding:16px">等待识别...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════
+     人脸录入
+══════════════════════════════════════ -->
+<div class="main page" id="page-reg">
+  <div class="reg-layout">
+    <div>
+      <div class="video-wrap" id="regVideoWrap">
+        <div class="video-placeholder" id="regPlaceholder">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="7" width="15" height="10" rx="2"/><path d="m17 9 5-2v10l-5-2"/></svg>
+          <div>录入摄像头未开启</div>
+        </div>
+        <img id="regFeed" src="" style="display:none" alt="录入视频流">
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+        <select id="regCamSelect" style="flex:1">
+          <option value="0">摄像头 0（默认）</option>
+        </select>
+        <button class="btn btn-outline" onclick="refreshCamList()" style="padding:6px 10px" title="刷新">↻</button>
+        <button class="btn btn-primary" id="btnRegStart" onclick="regCamStart()">▶ 开启摄像头</button>
+        <button class="btn btn-danger"  id="btnRegStop"  onclick="regCamStop()" disabled>■ 停止</button>
+      </div>
+    </div>
+
+    <div class="reg-steps">
+      <!-- 步骤1：设置姓名 -->
+      <div class="card">
+        <div class="card-title">第一步：设置录入姓名</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div class="form-row">
+            <label>姓名 *</label>
+            <input id="regName" placeholder="请输入姓名" maxlength="30">
+          </div>
+          <div class="form-row">
+            <label>工号（可选）</label>
+            <input id="regEmpId" placeholder="工号">
+          </div>
+          <div class="form-row">
+            <label>部门（可选）</label>
+            <input id="regDept" placeholder="部门">
+          </div>
+          <button class="btn btn-outline" onclick="regSetName()">确认姓名并创建文件夹</button>
+          <div class="tip" id="regNameTip" style="display:none"></div>
+        </div>
+      </div>
+
+      <!-- 步骤2：拍照 -->
+      <div class="card">
+        <div class="card-title">第二步：采集人脸图像</div>
+        <div style="text-align:center;margin-bottom:10px">
+          <div class="capture-count" id="captureCount">0</div>
+          <div class="capture-label">已保存照片数</div>
+        </div>
+        <button class="btn btn-primary" style="width:100%;margin-bottom:8px" onclick="regCapture()">📷 保存当前帧</button>
+        <div class="tip">建议从不同角度拍摄 <strong>10~20张</strong>照片以提高识别精度。</div>
+        <div class="tip warn" id="regWarnTip" style="display:none;margin-top:6px"></div>
+      </div>
+
+      <!-- 步骤3：提取特征 -->
+      <div class="card">
+        <div class="card-title">第三步：提取特征入库</div>
+        <button class="btn btn-warn" style="width:100%;margin-bottom:8px" id="btnExtract" onclick="extractFeatures()">⚙ 提取特征并更新特征库</button>
+        <div class="tip">提取完成后识别摄像头将自动更新，无需重启。</div>
+        <div class="tip" id="extractTip" style="display:none;margin-top:6px"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════
+     人员管理
+══════════════════════════════════════ -->
+<div class="main page" id="page-persons">
+  <div class="card">
+    <div class="toolbar">
+      <input class="search-box" id="personSearch" placeholder="搜索姓名 / 工号..." oninput="searchPersons(this.value)">
+      <button class="btn btn-primary" onclick="showAddPersonModal()">＋ 新增人员</button>
+      <button class="btn btn-outline" onclick="syncPersons()">⟳ 同步文件系统</button>
+      <button class="btn btn-outline" onclick="loadPersons()">刷新</button>
+      <span style="margin-left:auto;color:var(--text-dim);font-size:11px">共 <span id="personTotal">0</span> 条</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>人员</th><th>工号</th><th>部门</th><th>照片数</th><th>录入时间</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="personsBody"></tbody>
+    </table>
+    <div class="empty-tip" id="personsEmpty" style="display:none">暂无人员数据，请先添加</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════
+     识别记录
+══════════════════════════════════════ -->
+<div class="main page" id="page-logs">
+  <div class="card">
+    <div class="filter-bar">
+      <input id="logName" placeholder="按姓名筛选" style="width:130px">
+      <input id="logStart" type="date" style="width:140px">
+      <input id="logEnd"   type="date" style="width:140px">
+      <button class="btn btn-outline" onclick="loadLogs()">查询</button>
+      <button class="btn btn-outline" onclick="exportLogs()">导出CSV</button>
+      <span style="margin-left:auto;color:var(--text-dim);font-size:11px">共 <span id="logTotal">0</span> 条</span>
+    </div>
+    <table>
+      <thead>
+        <tr><th>识别时间</th><th>姓名</th><th>欧式距离</th><th>摄像头</th><th>抓拍</th></tr>
+      </thead>
+      <tbody id="logsBody"></tbody>
+    </table>
+    <div class="empty-tip" id="logsEmpty" style="display:none">暂无识别记录</div>
+  </div>
+</div>
+
+<!-- ── 新增人员模态框 ── -->
+<div class="modal-overlay" id="addPersonModal">
+  <div class="modal">
+    <h3>新增人员</h3>
+    <div class="form-row"><label>姓名 *</label><input id="addName" placeholder="姓名"></div>
+    <div class="form-row"><label>工号</label><input id="addEmpId" placeholder="工号"></div>
+    <div class="form-row"><label>部门</label><input id="addDept" placeholder="部门"></div>
+    <div class="modal-btns">
+      <button class="btn btn-outline" onclick="closeModal('addPersonModal')">取消</button>
+      <button class="btn btn-primary" onclick="addPerson()">确认添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── 编辑人员模态框 ── -->
+<div class="modal-overlay" id="editPersonModal">
+  <div class="modal">
+    <h3>编辑人员信息</h3>
+    <div class="form-row"><label>姓名（不可修改）</label><input id="editName" readonly style="opacity:.5"></div>
+    <div class="form-row"><label>工号</label><input id="editEmpId" placeholder="工号"></div>
+    <div class="form-row"><label>部门</label><input id="editDept" placeholder="部门"></div>
+    <div class="modal-btns">
+      <button class="btn btn-outline" onclick="closeModal('editPersonModal')">取消</button>
+      <button class="btn btn-primary" onclick="savePerson()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════
+//  工具函数
+// ═══════════════════════════════════════
+function toast(msg, type='ok', dur=2800) {
+  const w = document.getElementById('toastWrap');
+  const d = document.createElement('div');
+  d.className = `toast ${type}`;
+  d.textContent = msg;
+  w.appendChild(d);
+  setTimeout(() => d.remove(), dur);
+}
+
+function goto(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  const idx = ['dash','cam','reg','persons','logs'].indexOf(page);
+  document.querySelectorAll('.nav-btn')[idx]?.classList.add('active');
+  if (page === 'persons') loadPersons();
+  if (page === 'logs')    loadLogs();
+  if (page === 'dash')    loadDash();
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.remove('show');
+}
+
+// ═══════════════════════════════════════
+//  时钟 & 系统状态轮询
+// ═══════════════════════════════════════
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent =
+    now.toLocaleDateString('zh-CN') + ' ' +
+    now.toTimeString().slice(0,8);
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+let camRunning = false;
+let regRunning = false;
+
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/camera/status');
+    const d = await r.json();
+    camRunning = d.running;
+    document.getElementById('statusDot').className  = 'dot' + (d.running ? ' online' : '');
+    document.getElementById('statusText').textContent = d.running ? '在线' : '离线';
+    document.getElementById('d-faces').textContent  = d.face_count ?? '—';
+    document.getElementById('sysReco').innerHTML = d.running
+      ? '<span class="tag tag-on">运行中</span>'
+      : '<span class="tag tag-off">已停止</span>';
+
+    // 识别结果
+    const rl = document.getElementById('resultList');
+    if (d.detected && d.detected.length > 0) {
+      rl.innerHTML = d.detected.map(x => `
+        <div class="result-item">
+          <div class="result-avatar">${x.name !== 'unknown' ? x.name[0] : '?'}</div>
+          <div>
+            <div class="result-name">${x.name}</div>
+            <div class="result-dist">e-dist: ${x.e_dist}</div>
+          </div>
+        </div>`).join('');
+    } else if (!d.running) {
+      rl.innerHTML = '<div style="color:var(--text-dim);font-size:11px;text-align:center;padding:16px">等待识别...</div>';
+    }
+  } catch(e) {}
+
+  try {
+    const r2 = await fetch('/api/register/camera/status');
+    const d2 = await r2.json();
+    regRunning = d2.running;
+    document.getElementById('sysReg').innerHTML = d2.running
+      ? '<span class="tag tag-on">运行中</span>'
+      : '<span class="tag tag-off">已停止</span>';
+    if (d2.running) {
+      document.getElementById('captureCount').textContent = d2.save_count;
+      const wt = document.getElementById('regWarnTip');
+      if (d2.out_of_range) {
+        wt.style.display = 'block';
+        wt.textContent = '⚠ 人脸超出范围，请调整与摄像头的距离';
+      } else {
+        wt.style.display = 'none';
+      }
+    }
+  } catch(e) {}
+}
+setInterval(pollStatus, 1200);
+pollStatus();
+
+// ═══════════════════════════════════════
+//  摄像头列表
+// ═══════════════════════════════════════
+async function refreshCamList() {
+  try {
+    const r = await fetch('/api/cameras');
+    const d = await r.json();
+    const cams = d.cameras || [];
+    ['camSelect','regCamSelect'].forEach(id => {
+      const sel = document.getElementById(id);
+      sel.innerHTML = '';
+      if (cams.length === 0) {
+        sel.innerHTML = '<option value="0">摄像头 0（默认）</option>';
+      } else {
+        cams.forEach(i => {
+          sel.innerHTML += `<option value="${i}">摄像头 ${i}</option>`;
+        });
+      }
+    });
+    toast(`检测到 ${cams.length} 个摄像头`, 'ok');
+  } catch(e) {
+    toast('获取摄像头列表失败', 'err');
+  }
+}
+
+// ═══════════════════════════════════════
+//  识别摄像头控制
+// ═══════════════════════════════════════
+async function camStart() {
+  const camId = parseInt(document.getElementById('camSelect').value || '0');
+  const r = await fetch('/api/camera/start', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({camera_id: camId})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    document.getElementById('camPlaceholder').style.display = 'none';
+    const feed = document.getElementById('camFeed');
+    feed.src = '/video_feed';
+    feed.style.display = 'block';
+    document.getElementById('btnStart').disabled = true;
+    document.getElementById('btnStop').disabled  = false;
+    toast('识别摄像头已开启');
+  } else {
+    toast(d.msg || '开启失败', 'err');
+  }
+}
+
+async function camStop() {
+  await fetch('/api/camera/stop', {method:'POST'});
+  document.getElementById('camFeed').style.display = 'none';
+  document.getElementById('camFeed').src = '';
+  document.getElementById('camPlaceholder').style.display = 'flex';
+  document.getElementById('btnStart').disabled = false;
+  document.getElementById('btnStop').disabled  = true;
+  toast('识别摄像头已停止', 'warn');
+}
+
+async function reloadFeatures() {
+  const r = await fetch('/api/features/reload', {method:'POST'});
+  const d = await r.json();
+  if (d.ok) {
+    toast(`特征库已重载，共 ${d.count} 人`, 'ok');
+    document.getElementById('sysFeature').textContent = `已加载 ${d.count} 人`;
+    document.getElementById('d-features').textContent = d.count;
+  } else {
+    toast('特征库重载失败', 'err');
+  }
+}
+
+// ═══════════════════════════════════════
+//  录入摄像头控制
+// ═══════════════════════════════════════
+async function regCamStart() {
+  const camId = parseInt(document.getElementById('regCamSelect').value || '0');
+  const r = await fetch('/api/register/camera/start', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({camera_id: camId})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    document.getElementById('regPlaceholder').style.display = 'none';
+    const feed = document.getElementById('regFeed');
+    feed.src = '/register_feed';
+    feed.style.display = 'block';
+    document.getElementById('btnRegStart').disabled = true;
+    document.getElementById('btnRegStop').disabled  = false;
+    toast('录入摄像头已开启');
+  } else {
+    toast(d.msg || '开启失败', 'err');
+  }
+}
+
+async function regCamStop() {
+  await fetch('/api/register/camera/stop', {method:'POST'});
+  document.getElementById('regFeed').style.display = 'none';
+  document.getElementById('regFeed').src = '';
+  document.getElementById('regPlaceholder').style.display = 'flex';
+  document.getElementById('btnRegStart').disabled = false;
+  document.getElementById('btnRegStop').disabled  = true;
+  toast('录入摄像头已停止', 'warn');
+}
+
+async function regSetName() {
+  const name   = document.getElementById('regName').value.trim();
+  const empId  = document.getElementById('regEmpId').value.trim();
+  const dept   = document.getElementById('regDept').value.trim();
+  if (!name) { toast('请先填写姓名', 'err'); return; }
+  const r = await fetch('/api/register/set_name', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({name, employee_id: empId, department: dept})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    const tip = document.getElementById('regNameTip');
+    tip.style.display = 'block';
+    tip.className = 'tip ok';
+    tip.textContent = `✓ 当前录入对象：${name}，已有 ${d.save_count} 张照片`;
+    document.getElementById('captureCount').textContent = d.save_count;
+    toast(`已设置录入姓名：${name}`);
+  } else {
+    toast(d.msg || '设置失败', 'err');
+  }
+}
+
+async function regCapture() {
+  const r = await fetch('/api/register/capture', {method:'POST'});
+  const d = await r.json();
+  if (d.ok) {
+    document.getElementById('captureCount').textContent = d.save_count;
+    toast(`✓ 已保存第 ${d.save_count} 张`, 'ok', 1500);
+  } else {
+    toast(d.msg || '保存失败', 'err');
+  }
+}
+
+async function extractFeatures() {
+  const btn = document.getElementById('btnExtract');
+  btn.disabled = true;
+  btn.textContent = '⏳ 提取中，请稍候...';
+  const tip = document.getElementById('extractTip');
+  tip.style.display = 'block';
+  tip.className = 'tip';
+  tip.textContent = '正在提取特征，请稍候（可能需要数秒到数分钟）...';
+
+  try {
+    const r = await fetch('/api/register/extract_features', {method:'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      tip.className = 'tip ok';
+      tip.textContent = `✓ ${d.msg}（共 ${d.count} 人）`;
+      toast(d.msg, 'ok');
+      document.getElementById('d-features').textContent = d.count;
+    } else {
+      tip.className = 'tip warn';
+      tip.textContent = `✗ 提取失败：${d.msg}`;
+      toast('特征提取失败', 'err');
+    }
+  } catch(e) {
+    tip.className = 'tip warn';
+    tip.textContent = '✗ 网络错误';
+  }
+  btn.disabled = false;
+  btn.textContent = '⚙ 提取特征并更新特征库';
+}
+
+// ═══════════════════════════════════════
+//  人员管理
+// ═══════════════════════════════════════
+let personSearchTimeout = null;
+function searchPersons(val) {
+  clearTimeout(personSearchTimeout);
+  personSearchTimeout = setTimeout(() => loadPersons(val), 300);
+}
+
+async function loadPersons(q='') {
+  q = q || document.getElementById('personSearch').value.trim();
+  const url = q ? `/api/persons?q=${encodeURIComponent(q)}` : '/api/persons';
+  const r = await fetch(url);
+  const rows = await r.json();
+  document.getElementById('personTotal').textContent = rows.length;
+  const body = document.getElementById('personsBody');
+  const empty = document.getElementById('personsEmpty');
+  if (rows.length === 0) {
+    body.innerHTML = '';
+    empty.style.display = 'block';
+  } else {
+    empty.style.display = 'none';
+    body.innerHTML = rows.map(p => `
+      <tr>
+        <td style="font-weight:bold;color:var(--accent)">${escHtml(p.name)}</td>
+        <td>${escHtml(p.employee_id||'—')}</td>
+        <td>${escHtml(p.department||'—')}</td>
+        <td><span class="badge">${p.photo_count||0}</span></td>
+        <td style="color:var(--text-dim)">${p.created_at||'—'}</td>
+        <td>
+          <button class="btn btn-outline" style="padding:3px 10px;font-size:11px" onclick="editPerson('${escHtml(p.name)}','${escHtml(p.employee_id||'')}','${escHtml(p.department||'')}')">编辑</button>
+          <button class="btn btn-danger"  style="padding:3px 10px;font-size:11px;margin-left:4px" onclick="deletePerson('${escHtml(p.name)}')">删除</button>
+        </td>
+      </tr>`).join('');
+  }
+}
+
+function showAddPersonModal() {
+  document.getElementById('addName').value = '';
+  document.getElementById('addEmpId').value = '';
+  document.getElementById('addDept').value = '';
+  document.getElementById('addPersonModal').classList.add('show');
+}
+
+async function addPerson() {
+  const name   = document.getElementById('addName').value.trim();
+  const empId  = document.getElementById('addEmpId').value.trim();
+  const dept   = document.getElementById('addDept').value.trim();
+  if (!name) { toast('姓名不能为空', 'err'); return; }
+  const r = await fetch('/api/persons', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({name, employee_id:empId, department:dept})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    closeModal('addPersonModal');
+    toast(`已添加：${name}`);
+    loadPersons();
+  } else {
+    toast(d.msg || '添加失败', 'err');
+  }
+}
+
+function editPerson(name, empId, dept) {
+  document.getElementById('editName').value  = name;
+  document.getElementById('editEmpId').value = empId;
+  document.getElementById('editDept').value  = dept;
+  document.getElementById('editPersonModal').classList.add('show');
+}
+
+async function savePerson() {
+  const name  = document.getElementById('editName').value;
+  const empId = document.getElementById('editEmpId').value;
+  const dept  = document.getElementById('editDept').value;
+  const r = await fetch(`/api/persons/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({employee_id:empId, department:dept})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    closeModal('editPersonModal');
+    toast('已保存');
+    loadPersons();
+  } else {
+    toast('保存失败', 'err');
+  }
+}
+
+async function deletePerson(name) {
+  if (!confirm(`确认删除 "${name}"？此操作将同时删除其人脸照片文件夹。`)) return;
+  const r = await fetch(`/api/persons/${encodeURIComponent(name)}`, {method:'DELETE'});
+  const d = await r.json();
+  if (d.ok) { toast(`已删除：${name}`, 'warn'); loadPersons(); }
+  else toast('删除失败', 'err');
+}
+
+async function syncPersons() {
+  const r = await fetch('/api/persons/sync', {method:'POST'});
+  const d = await r.json();
+  toast(`同步完成，新增 ${d.added} 条记录`, d.added > 0 ? 'ok' : 'warn');
+  loadPersons();
+}
+
+// ═══════════════════════════════════════
+//  识别记录
+// ═══════════════════════════════════════
+async function loadLogs() {
+  const name  = document.getElementById('logName').value.trim();
+  const start = document.getElementById('logStart').value;
+  const end   = document.getElementById('logEnd').value;
+  let url = '/api/logs?limit=200';
+  if (name)  url += `&name=${encodeURIComponent(name)}`;
+  if (start) url += `&start=${start}`;
+  if (end)   url += `&end=${end}`;
+  const r = await fetch(url);
+  const rows = await r.json();
+  document.getElementById('logTotal').textContent = rows.length;
+  const body  = document.getElementById('logsBody');
+  const empty = document.getElementById('logsEmpty');
+  if (rows.length === 0) {
+    body.innerHTML = '';
+    empty.style.display = 'block';
+  } else {
+    empty.style.display = 'none';
+    body.innerHTML = rows.map(row => `
+      <tr>
+        <td><span class="log-dot"></span>${row.recognized_at||'—'}</td>
+        <td style="color:${row.person_name!=='unknown'?'var(--accent)':'var(--text-dim)'};font-weight:bold">${escHtml(row.person_name||'—')}</td>
+        <td style="color:var(--text-dim)">${row.e_distance ?? '—'}</td>
+        <td>摄像头 ${row.camera_id ?? 0}</td>
+        <td>${row.snapshot_path ? `<a href="/api/snapshots/${row.snapshot_path.split('/').pop()}" target="_blank" style="color:var(--accent2)">查看</a>` : '—'}</td>
+      </tr>`).join('');
+  }
+}
+
+function exportLogs() {
+  const name  = document.getElementById('logName').value.trim();
+  const start = document.getElementById('logStart').value;
+  const end   = document.getElementById('logEnd').value;
+  let url = '/api/logs/export?';
+  if (name)  url += `name=${encodeURIComponent(name)}&`;
+  if (start) url += `start=${start}&`;
+  if (end)   url += `end=${end}&`;
+  window.open(url, '_blank');
+}
+
+// ═══════════════════════════════════════
+//  仪表盘
+// ═══════════════════════════════════════
+async function loadDash() {
+  try {
+    const rp = await fetch('/api/persons');
+    const persons = await rp.json();
+    document.getElementById('d-persons').textContent = persons.length;
+
+    const rs = await fetch('/api/logs/stats?days=1');
+    const stats1 = await rs.json();
+    const todayTotal = stats1.reduce((s,x) => s + (x.count||0), 0);
+    document.getElementById('d-today').textContent = todayTotal;
+
+    const rs7 = await fetch('/api/logs/stats?days=7');
+    const stats7 = await rs7.json();
+    const tbody = document.getElementById('dashStatsBody');
+    if (stats7.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-dim);text-align:center;padding:16px">暂无数据</td></tr>';
+    } else {
+      tbody.innerHTML = stats7.map(s => `
+        <tr>
+          <td style="color:var(--accent)">${escHtml(s.person_name)}</td>
+          <td><span class="badge">${s.count}</span></td>
+          <td style="color:var(--text-dim);font-size:11px">${s.last_seen||'—'}</td>
+        </tr>`).join('');
+    }
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════════
+//  小工具
+// ═══════════════════════════════════════
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ═══════════════════════════════════════
+//  初始化
+// ═══════════════════════════════════════
+(async function init() {
+  await refreshCamList();
+  loadDash();
+  // 自动同步文件系统到数据库
+  try {
+    await fetch('/api/persons/sync', {method:'POST'});
+  } catch(e) {}
+})();
+</script>
+</body>
+</html>

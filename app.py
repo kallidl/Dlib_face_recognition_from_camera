@@ -1,0 +1,571 @@
+# app.py — Flask 后端 + 项目启动入口
+import os, time, threading, logging, subprocess, sys
+from datetime import datetime
+from flask import (Flask, Response, render_template, request,
+                   jsonify, send_from_directory)
+
+import cv2
+import dlib
+import numpy as np
+import pandas as pd
+from PIL import Image, ImageDraw, ImageFont
+
+from db_manager import (
+    init_db, add_person, update_person, delete_person,
+    get_all_persons, search_persons, get_person_by_name,
+    increment_photo_count, add_recognition_log,
+    query_logs, get_log_stats, export_logs_to_csv,
+)
+
+# ─────────────────────────────────────────
+app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+
+FACES_DIR     = "data/data_faces_from_camera/"
+SNAPSHOT_DIR  = "data/snapshots/"
+DATA_DLIB_DIR = "data/data_dlib/"
+os.makedirs(FACES_DIR,    exist_ok=True)
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+
+# ─────────────────────────────────────────
+# Dlib 延迟加载
+# ─────────────────────────────────────────
+_detector = _predictor = _reco_model = None
+
+def load_dlib():
+    global _detector, _predictor, _reco_model
+    if _detector is None:
+        _detector   = dlib.get_frontal_face_detector()
+        _predictor  = dlib.shape_predictor(DATA_DLIB_DIR + "shape_predictor_68_face_landmarks.dat")
+        _reco_model = dlib.face_recognition_model_v1(DATA_DLIB_DIR + "dlib_face_recognition_resnet_model_v1.dat")
+
+# ─────────────────────────────────────────
+# 从文件系统同步人员到数据库
+# ─────────────────────────────────────────
+def sync_persons_from_filesystem():
+    """扫描 data/data_faces_from_camera/ 将未入库人员自动添加到 persons 表"""
+    if not os.path.isdir(FACES_DIR):
+        return 0
+    added = 0
+    for folder_name in os.listdir(FACES_DIR):
+        folder_path = os.path.join(FACES_DIR, folder_name)
+        if not os.path.isdir(folder_path):
+            continue
+        if folder_name.startswith("person_"):
+            name = folder_name[len("person_"):]
+        else:
+            name = folder_name
+        if not name:
+            continue
+        photos = [f for f in os.listdir(folder_path)
+                  if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+        existing = get_person_by_name(name)
+        if existing is None:
+            new_id = add_person(name, folder_path=folder_path)
+            if new_id:
+                update_person(name, photo_count=len(photos))
+                logging.info("同步人员到数据库: %s（照片数: %d）", name, len(photos))
+                added += 1
+        else:
+            # 每次同步都刷新照片数
+            update_person(name, photo_count=len(photos))
+    return added
+
+# ─────────────────────────────────────────
+# 摄像头枚举
+# ─────────────────────────────────────────
+def list_cameras(max_test=5):
+    available = []
+    for i in range(max_test):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            available.append(i)
+            cap.release()
+    return available
+
+# ─────────────────────────────────────────
+# 识别摄像头状态
+# ─────────────────────────────────────────
+class CameraState:
+    def __init__(self):
+        self.cap             = None
+        self.running         = False
+        self.lock            = threading.Lock()
+        self.current_frame   = None
+        self.face_count      = 0
+        self.detected_names  = []
+        self.last_cnt        = 0
+        self.reclassify_cnt  = 0
+        self.reclassify_interval = 10
+        self.known_features  = []
+        self.known_names     = []
+        self.camera_id       = 0
+
+    def load_features(self):
+        self.known_features, self.known_names = [], []
+        csv_path = "data/features_all.csv"
+        if not os.path.exists(csv_path):
+            return False
+        df = pd.read_csv(csv_path, header=None)
+        for i in range(df.shape[0]):
+            self.known_names.append(df.iloc[i][0])
+            arr = [df.iloc[i][j] if df.iloc[i][j] != '' else '0' for j in range(1, 129)]
+            self.known_features.append(arr)
+        return True
+
+    @staticmethod
+    def euclid(f1, f2):
+        f1, f2 = np.array(f1, dtype=float), np.array(f2, dtype=float)
+        return float(np.sqrt(np.sum(np.square(f1 - f2))))
+
+    def recognize(self, feat):
+        if not self.known_features:
+            return "unknown", 9999.0
+        dists = []
+        for kf in self.known_features:
+            if str(kf[0]) != '0.0':
+                dists.append(self.euclid(feat, kf))
+            else:
+                dists.append(9999.0)
+        min_d = min(dists)
+        idx   = dists.index(min_d)
+        name  = self.known_names[idx] if min_d < 0.4 else "unknown"
+        return name, min_d
+
+CAM = CameraState()
+
+# ─────────────────────────────────────────
+# 录入摄像头状态
+# ─────────────────────────────────────────
+class RegisterState:
+    def __init__(self):
+        self.cap           = None
+        self.running       = False
+        self.lock          = threading.Lock()
+        self.current_frame = None
+        self.face_count    = 0
+        self.current_name  = ""
+        self.save_count    = 0
+        self.camera_id     = 0
+        self.out_of_range  = False
+        # 保存最近一帧原始图像用于截图
+        self.raw_frame     = None
+
+REG = RegisterState()
+
+def _register_loop():
+    detector_reg = dlib.get_frontal_face_detector()
+    cam = REG.cap
+    while REG.running and cam.isOpened():
+        ok, frame = cam.read()
+        if not ok:
+            break
+        with REG.lock:
+            REG.raw_frame = frame.copy()
+
+        faces = detector_reg(frame, 0)
+        draw = frame.copy()
+        out_of_range = False
+        for d in faces:
+            h = d.bottom() - d.top()
+            w = d.right() - d.left()
+            hh, ww = h // 2, w // 2
+            if (d.right() + ww > frame.shape[1] or d.bottom() + hh > frame.shape[0]
+                    or d.left() - ww < 0 or d.top() - hh < 0):
+                color = (80, 80, 255)
+                out_of_range = True
+            else:
+                color = (0, 255, 128)
+            x1 = max(0, d.left() - ww)
+            y1 = max(0, d.top() - hh)
+            x2 = min(frame.shape[1], d.right() + ww)
+            y2 = min(frame.shape[0], d.bottom() + hh)
+            cv2.rectangle(draw, (x1, y1), (x2, y2), color, 2)
+            cv2.rectangle(draw, (d.left(), d.top()), (d.right(), d.bottom()), color, 1)
+
+        REG.out_of_range = out_of_range
+        cv2.putText(draw, f"人脸数: {len(faces)}", (14, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 128), 1)
+        if out_of_range:
+            cv2.putText(draw, "请靠近摄像头或调整位置", (14, 56),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 80, 255), 1)
+        if REG.current_name:
+            cv2.putText(draw, f"当前录入: {REG.current_name}  已保存: {REG.save_count}张",
+                        (14, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 1)
+
+        _, buf = cv2.imencode('.jpg', draw, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        with REG.lock:
+            REG.current_frame = buf.tobytes()
+            REG.face_count = len(faces)
+
+    cam.release()
+    REG.running = False
+
+def _gen_register_frames():
+    while True:
+        with REG.lock:
+            frame = REG.current_frame
+        if frame:
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        time.sleep(0.033)
+
+# ─────────────────────────────────────────
+# 识别视频流线程
+# ─────────────────────────────────────────
+def _camera_loop():
+    load_dlib()
+    CAM.load_features()
+    cam_id = CAM.cap
+
+    try:
+        font_ch = ImageFont.truetype("simsun.ttc", 28)
+    except Exception:
+        font_ch = None
+
+    COOLDOWN = {}
+
+    while CAM.running and cam_id.isOpened():
+        ok, frame = cam_id.read()
+        if not ok:
+            break
+
+        faces = _detector(frame, 0)
+        cur_cnt = len(faces)
+
+        names_this_frame = []
+        if cur_cnt != CAM.last_cnt or CAM.reclassify_cnt == CAM.reclassify_interval:
+            CAM.reclassify_cnt = 0
+            for i, face in enumerate(faces):
+                shape = _predictor(frame, face)
+                feat  = _reco_model.compute_face_descriptor(frame, shape)
+                name, dist = CAM.recognize(feat)
+                now = time.time()
+                last_t = COOLDOWN.get(name, 0)
+                if name != "unknown" and (now - last_t) > 60:
+                    ts = time.strftime("%Y%m%d_%H%M%S")
+                    snap = os.path.join(SNAPSHOT_DIR, f"{name}_{ts}.jpg")
+                    cv2.imwrite(snap, frame)
+                    add_recognition_log(name, round(dist, 4), 0, snap)
+                    COOLDOWN[name] = now
+                names_this_frame.append({"name": name, "e_dist": round(dist, 4)})
+        else:
+            CAM.reclassify_cnt += 1
+            names_this_frame = CAM.detected_names[:]
+
+        CAM.last_cnt       = cur_cnt
+        CAM.detected_names = names_this_frame
+
+        draw_frame = frame.copy()
+        for i, d in enumerate(faces):
+            color = (0, 255, 128) if i < len(names_this_frame) and names_this_frame[i]["name"] != "unknown" else (80, 80, 255)
+            cv2.rectangle(draw_frame, (d.left(), d.top()), (d.right(), d.bottom()), color, 2)
+            sz = 12
+            for dx, dy in [(-1,-1),(1,-1),(1,1),(-1,1)]:
+                cx = d.right() if dx == 1 else d.left()
+                cy = d.bottom() if dy == 1 else d.top()
+                cv2.line(draw_frame, (cx, cy), (cx + dx*sz, cy), color, 2)
+                cv2.line(draw_frame, (cx, cy), (cx, cy + dy*sz), color, 2)
+            if i < len(names_this_frame):
+                label = names_this_frame[i]["name"]
+                if font_ch:
+                    pil_img = Image.fromarray(cv2.cvtColor(draw_frame, cv2.COLOR_BGR2RGB))
+                    d_draw  = ImageDraw.Draw(pil_img)
+                    d_draw.text((d.left(), d.bottom() + 6), label, font=font_ch,
+                                fill=(0, 255, 128) if label != "unknown" else (80, 80, 255))
+                    draw_frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                else:
+                    cv2.putText(draw_frame, label, (d.left(), d.bottom() + 22),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 1)
+
+        cv2.putText(draw_frame, f"人脸数: {cur_cnt}", (14, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 128), 1)
+
+        _, buf = cv2.imencode('.jpg', draw_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        with CAM.lock:
+            CAM.current_frame = buf.tobytes()
+            CAM.face_count    = cur_cnt
+
+    cam_id.release()
+    CAM.running = False
+
+def _gen_frames():
+    while True:
+        with CAM.lock:
+            frame = CAM.current_frame
+        if frame:
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        time.sleep(0.033)
+
+# ─────────────────────────────────────────
+# 路由
+# ─────────────────────────────────────────
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+# ── 摄像头列表 ──
+@app.route('/api/cameras')
+def cameras_list():
+    cams = list_cameras()
+    return jsonify(cameras=cams)
+
+# ── 识别摄像头 ──
+@app.route('/api/camera/start', methods=['POST'])
+def camera_start():
+    if CAM.running:
+        return jsonify(ok=True, msg="已在运行")
+    data = request.json or {}
+    cam_id = int(data.get('camera_id', 0))
+    CAM.camera_id = cam_id
+    CAM.cap = cv2.VideoCapture(cam_id)
+    if not CAM.cap.isOpened():
+        return jsonify(ok=False, msg="无法打开摄像头"), 500
+    CAM.running = True
+    CAM.load_features()
+    t = threading.Thread(target=_camera_loop, daemon=True)
+    t.start()
+    return jsonify(ok=True)
+
+@app.route('/api/camera/stop', methods=['POST'])
+def camera_stop():
+    CAM.running = False
+    return jsonify(ok=True)
+
+@app.route('/api/camera/status')
+def camera_status():
+    return jsonify(running=CAM.running, face_count=CAM.face_count,
+                   detected=CAM.detected_names)
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(_gen_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# ── 录入摄像头 ──
+@app.route('/api/register/camera/start', methods=['POST'])
+def register_camera_start():
+    if REG.running:
+        return jsonify(ok=True, msg="已在运行")
+    data = request.json or {}
+    cam_id = int(data.get('camera_id', 0))
+    REG.camera_id = cam_id
+    REG.cap = cv2.VideoCapture(cam_id)
+    if not REG.cap.isOpened():
+        return jsonify(ok=False, msg="无法打开摄像头"), 500
+    REG.running = True
+    t = threading.Thread(target=_register_loop, daemon=True)
+    t.start()
+    return jsonify(ok=True)
+
+@app.route('/api/register/camera/stop', methods=['POST'])
+def register_camera_stop():
+    REG.running = False
+    return jsonify(ok=True)
+
+@app.route('/api/register/camera/status')
+def register_camera_status():
+    return jsonify(running=REG.running, face_count=REG.face_count,
+                   save_count=REG.save_count, out_of_range=REG.out_of_range,
+                   current_name=REG.current_name)
+
+@app.route('/register_feed')
+def register_feed():
+    return Response(_gen_register_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/api/register/set_name', methods=['POST'])
+def register_set_name():
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify(ok=False, msg="姓名不能为空"), 400
+    folder = os.path.join(FACES_DIR, f"person_{name}")
+    os.makedirs(folder, exist_ok=True)
+    REG.current_name = name
+    REG.save_count = len([f for f in os.listdir(folder)
+                           if f.lower().endswith(('.jpg', '.png', '.jpeg'))])
+    existing = get_person_by_name(name)
+    if existing is None:
+        new_id = add_person(name,
+                            employee_id=data.get('employee_id', ''),
+                            department=data.get('department', ''),
+                            folder_path=folder)
+    return jsonify(ok=True, save_count=REG.save_count)
+
+@app.route('/api/register/capture', methods=['POST'])
+def register_capture():
+    if not REG.current_name:
+        return jsonify(ok=False, msg="请先设置录入姓名"), 400
+    if REG.face_count == 0:
+        return jsonify(ok=False, msg="当前帧未检测到人脸"), 400
+    if REG.face_count > 1:
+        return jsonify(ok=False, msg="检测到多张人脸，请确保画面中只有一张"), 400
+    if REG.out_of_range:
+        return jsonify(ok=False, msg="人脸超出范围，请调整位置"), 400
+
+    with REG.lock:
+        raw = REG.raw_frame
+    if raw is None:
+        return jsonify(ok=False, msg="无法获取当前帧"), 400
+
+    folder = os.path.join(FACES_DIR, f"person_{REG.current_name}")
+    os.makedirs(folder, exist_ok=True)
+    REG.save_count += 1
+    filename = f"img_face_{REG.save_count}.jpg"
+    cv2.imwrite(os.path.join(folder, filename), raw)
+    increment_photo_count(REG.current_name, 1)
+    return jsonify(ok=True, save_count=REG.save_count, filename=filename)
+
+@app.route('/api/register/extract_features', methods=['POST'])
+def register_extract_features():
+    try:
+        result = subprocess.run(
+            [sys.executable, "features_extraction_to_csv.py"],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            return jsonify(ok=False, msg=result.stderr[:500]), 500
+        ok = CAM.load_features()
+        return jsonify(ok=True, msg="特征提取完成，已重载特征库",
+                       count=len(CAM.known_names))
+    except subprocess.TimeoutExpired:
+        return jsonify(ok=False, msg="特征提取超时"), 500
+    except Exception as e:
+        return jsonify(ok=False, msg=str(e)), 500
+
+# ── 人员管理 ──
+@app.route('/api/persons', methods=['GET'])
+def persons_list():
+    kw = request.args.get('q', '').strip()
+    rows = search_persons(kw) if kw else get_all_persons()
+    for r in rows:
+        r['created_at'] = str(r.get('created_at', ''))[:19]
+        r['updated_at'] = str(r.get('updated_at', ''))[:19]
+    return jsonify(rows)
+
+@app.route('/api/persons', methods=['POST'])
+def persons_add():
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify(ok=False, msg="姓名不能为空"), 400
+    folder = os.path.join(FACES_DIR, f"person_{name}")
+    new_id = add_person(name,
+                        employee_id=data.get('employee_id', ''),
+                        department=data.get('department', ''),
+                        folder_path=folder)
+    if new_id is None:
+        return jsonify(ok=False, msg=f"姓名 '{name}' 已存在"), 409
+    os.makedirs(folder, exist_ok=True)
+    return jsonify(ok=True, id=new_id)
+
+@app.route('/api/persons/<name>', methods=['PUT'])
+def persons_update(name):
+    data = request.json or {}
+    update_person(name,
+                  employee_id=data.get('employee_id'),
+                  department=data.get('department'))
+    return jsonify(ok=True)
+
+@app.route('/api/persons/<name>', methods=['DELETE'])
+def persons_delete(name):
+    import shutil
+    folder = os.path.join(FACES_DIR, f"person_{name}")
+    if os.path.isdir(folder):
+        shutil.rmtree(folder)
+    delete_person(name)
+    return jsonify(ok=True)
+
+@app.route('/api/persons/<name>/photos', methods=['GET'])
+def persons_photos(name):
+    folder = os.path.join(FACES_DIR, f"person_{name}")
+    if not os.path.isdir(folder):
+        return jsonify([])
+    files = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+    return jsonify(files)
+
+@app.route('/api/persons/photos/<name>/<filename>')
+def serve_photo(name, filename):
+    folder = os.path.join(FACES_DIR, f"person_{name}")
+    return send_from_directory(folder, filename)
+
+@app.route('/api/features/reload', methods=['POST'])
+def reload_features():
+    ok = CAM.load_features()
+    return jsonify(ok=ok, count=len(CAM.known_names))
+
+@app.route('/api/persons/sync', methods=['POST'])
+def persons_sync():
+    added = sync_persons_from_filesystem()
+    return jsonify(ok=True, added=added)
+
+# ── 识别记录 ──
+@app.route('/api/logs', methods=['GET'])
+def logs_list():
+    name    = request.args.get('name') or None
+    start_s = request.args.get('start') or None
+    end_s   = request.args.get('end')   or None
+    limit   = int(request.args.get('limit', 200))
+
+    def parse_dt(s):
+        if not s: return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try: return datetime.strptime(s, fmt)
+            except: pass
+        return None
+
+    rows = query_logs(person_name=name, start_dt=parse_dt(start_s),
+                      end_dt=parse_dt(end_s), limit=limit)
+    for r in rows:
+        r['recognized_at'] = str(r.get('recognized_at', ''))[:19]
+        r['e_distance']    = round(r['e_distance'], 4) if r.get('e_distance') else None
+    return jsonify(rows)
+
+@app.route('/api/logs/stats', methods=['GET'])
+def logs_stats():
+    days = int(request.args.get('days', 7))
+    rows = get_log_stats(days)
+    for r in rows:
+        r['last_seen'] = str(r.get('last_seen', ''))[:19]
+    return jsonify(rows)
+
+@app.route('/api/logs/export', methods=['GET'])
+def logs_export():
+    tmp = f"/tmp/logs_{int(time.time())}.csv"
+    name    = request.args.get('name') or None
+    start_s = request.args.get('start') or None
+    end_s   = request.args.get('end')   or None
+
+    def parse_dt(s):
+        if not s: return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try: return datetime.strptime(s, fmt)
+            except: pass
+        return None
+
+    export_logs_to_csv(tmp, person_name=name,
+                       start_dt=parse_dt(start_s), end_dt=parse_dt(end_s))
+    with open(tmp, 'rb') as f:
+        data = f.read()
+    os.unlink(tmp)
+    return Response(data, mimetype='text/csv',
+                    headers={"Content-Disposition": "attachment; filename=recognition_logs.csv"})
+
+@app.route('/api/snapshots/<filename>')
+def serve_snapshot(filename):
+    return send_from_directory(SNAPSHOT_DIR, filename)
+
+# ─────────────────────────────────────────
+# 启动
+# ─────────────────────────────────────────
+if __name__ == '__main__':
+    init_db()
+    n = sync_persons_from_filesystem()
+    if n > 0:
+        logging.info("启动时同步了 %d 位人员到数据库", n)
+    print("\n" + "═"*52)
+    print("  人脸识别系统已启动")
+    print("  浏览器访问 → http://127.0.0.1:5000")
+    print("═"*52 + "\n")
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
