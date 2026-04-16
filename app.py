@@ -28,6 +28,21 @@ os.makedirs(FACES_DIR,    exist_ok=True)
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
 # ─────────────────────────────────────────
+# Windows 中文路径安全写图工具函数
+# cv2.imwrite 在 Windows 下不支持中文路径，用 PIL 代替
+# ─────────────────────────────────────────
+def safe_imwrite(path, img_bgr):
+    """兼容 Windows 中文路径的图片保存（BGR numpy array）。"""
+    try:
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        pil_img.save(path)
+        return True
+    except Exception as e:
+        logging.error("safe_imwrite failed: %s", e)
+        return False
+
+# ─────────────────────────────────────────
 # Dlib 延迟加载
 # ─────────────────────────────────────────
 _detector = _predictor = _reco_model = None
@@ -67,7 +82,6 @@ def sync_persons_from_filesystem():
                 logging.info("同步人员到数据库: %s（照片数: %d）", name, len(photos))
                 added += 1
         else:
-            # 每次同步都刷新照片数
             update_person(name, photo_count=len(photos))
     return added
 
@@ -100,17 +114,41 @@ class CameraState:
         self.known_features  = []
         self.known_names     = []
         self.camera_id       = 0
+        # OT 追踪状态
+        self.last_frame_face_centroid_list  = []
+        self.current_frame_face_centroid_list = []
+        self.last_frame_face_name_list      = []
+        self.current_frame_face_name_list   = []
+        self.last_frame_face_cnt            = 0
+        self.reclassify_interval_cnt        = 0
 
     def load_features(self):
+        """加载特征库，同时重置OT追踪状态和识别缓存，确保删除人员后立即生效"""
         self.known_features, self.known_names = [], []
+        # 重置OT状态，避免旧名字残留
+        self.last_frame_face_centroid_list  = []
+        self.current_frame_face_centroid_list = []
+        self.last_frame_face_name_list      = []
+        self.current_frame_face_name_list   = []
+        self.last_frame_face_cnt            = 0
+        self.reclassify_interval_cnt        = 0
+        self.detected_names                 = []
+
         csv_path = "data/features_all.csv"
         if not os.path.exists(csv_path):
             return False
-        df = pd.read_csv(csv_path, header=None)
-        for i in range(df.shape[0]):
-            self.known_names.append(df.iloc[i][0])
-            arr = [df.iloc[i][j] if df.iloc[i][j] != '' else '0' for j in range(1, 129)]
-            self.known_features.append(arr)
+        # 空文件检查
+        if os.path.getsize(csv_path) == 0:
+            return True
+        try:
+            df = pd.read_csv(csv_path, header=None)
+            for i in range(df.shape[0]):
+                self.known_names.append(df.iloc[i][0])
+                arr = [df.iloc[i][j] if df.iloc[i][j] != '' else '0' for j in range(1, 129)]
+                self.known_features.append(arr)
+        except Exception as e:
+            logging.error("加载特征库失败: %s", e)
+            return False
         return True
 
     @staticmethod
@@ -132,6 +170,16 @@ class CameraState:
         name  = self.known_names[idx] if min_d < 0.4 else "unknown"
         return name, min_d
 
+    def centroid_tracker(self):
+        """OT质心追踪：用上一帧质心匹配当前帧人脸，避免每帧重新识别"""
+        for i in range(len(self.current_frame_face_centroid_list)):
+            dists = [
+                self.euclid(self.current_frame_face_centroid_list[i], last_c)
+                for last_c in self.last_frame_face_centroid_list
+            ]
+            best = dists.index(min(dists))
+            self.current_frame_face_name_list[i] = self.last_frame_face_name_list[best]
+
 CAM = CameraState()
 
 # ─────────────────────────────────────────
@@ -148,7 +196,6 @@ class RegisterState:
         self.save_count    = 0
         self.camera_id     = 0
         self.out_of_range  = False
-        # 保存最近一帧原始图像用于截图
         self.raw_frame     = None
 
 REG = RegisterState()
@@ -184,13 +231,13 @@ def _register_loop():
             cv2.rectangle(draw, (d.left(), d.top()), (d.right(), d.bottom()), color, 1)
 
         REG.out_of_range = out_of_range
-        cv2.putText(draw, f"人脸数: {len(faces)}", (14, 28),
+        cv2.putText(draw, f"Faces: {len(faces)}", (14, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 128), 1)
         if out_of_range:
-            cv2.putText(draw, "请靠近摄像头或调整位置", (14, 56),
+            cv2.putText(draw, "Too close - adjust position", (14, 56),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 80, 255), 1)
         if REG.current_name:
-            cv2.putText(draw, f"当前录入: {REG.current_name}  已保存: {REG.save_count}张",
+            cv2.putText(draw, f"Saving: {REG.save_count} photos",
                         (14, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 255), 1)
 
         _, buf = cv2.imencode('.jpg', draw, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -213,6 +260,12 @@ def _gen_register_frames():
 # 识别视频流线程
 # ─────────────────────────────────────────
 def _camera_loop():
+    """
+    使用 OT（质心追踪）算法的识别循环：
+    - 人脸数变化 或 reclassify_interval 到达时，才做完整识别（计算特征描述子）
+    - 其余帧只做检测 + 质心追踪，大幅提升 FPS
+    - load_features() 时已重置 OT 状态，保证删除人员后立即生效
+    """
     load_dlib()
     CAM.load_features()
     cam_id = CAM.cap
@@ -222,7 +275,7 @@ def _camera_loop():
     except Exception:
         font_ch = None
 
-    COOLDOWN = {}
+    COOLDOWN = {}  # {name: last_log_time}
 
     while CAM.running and cam_id.isOpened():
         ok, frame = cam_id.read()
@@ -232,52 +285,100 @@ def _camera_loop():
         faces = _detector(frame, 0)
         cur_cnt = len(faces)
 
-        names_this_frame = []
-        if cur_cnt != CAM.last_cnt or CAM.reclassify_cnt == CAM.reclassify_interval:
-            CAM.reclassify_cnt = 0
-            for i, face in enumerate(faces):
-                shape = _predictor(frame, face)
-                feat  = _reco_model.compute_face_descriptor(frame, shape)
-                name, dist = CAM.recognize(feat)
-                now = time.time()
-                last_t = COOLDOWN.get(name, 0)
-                if name != "unknown" and (now - last_t) > 60:
-                    ts = time.strftime("%Y%m%d_%H%M%S")
-                    snap = os.path.join(SNAPSHOT_DIR, f"{name}_{ts}.jpg")
-                    cv2.imwrite(snap, frame)
-                    add_recognition_log(name, round(dist, 4), 0, snap)
-                    COOLDOWN[name] = now
-                names_this_frame.append({"name": name, "e_dist": round(dist, 4)})
+        # 更新帧间状态
+        CAM.last_frame_face_cnt = cur_cnt  # 用完立刻更新（下面判断前先保存上帧值）
+        last_cnt_snapshot = CAM.last_cnt
+        CAM.last_cnt = cur_cnt
+
+        # ── 场景一：人脸数不变 且 不需要重识别 ──
+        if cur_cnt == last_cnt_snapshot and CAM.reclassify_interval_cnt != CAM.reclassify_interval:
+            if "unknown" in [x.get("name") for x in CAM.detected_names]:
+                CAM.reclassify_interval_cnt += 1
+
+            CAM.current_frame_face_centroid_list = []
+            if cur_cnt > 0:
+                for d in faces:
+                    CAM.current_frame_face_centroid_list.append(
+                        [(d.left() + d.right()) / 2, (d.top() + d.bottom()) / 2]
+                    )
+                # 多人脸时用质心追踪复用上帧识别结果
+                if cur_cnt != 1 and len(CAM.last_frame_face_centroid_list) == cur_cnt:
+                    CAM.centroid_tracker()
+
+        # ── 场景二：人脸数变化 或 需要重识别 ──
         else:
-            CAM.reclassify_cnt += 1
-            names_this_frame = CAM.detected_names[:]
+            CAM.reclassify_interval_cnt = 0
+            CAM.current_frame_face_centroid_list = []
 
-        CAM.last_cnt       = cur_cnt
-        CAM.detected_names = names_this_frame
+            if cur_cnt == 0:
+                CAM.current_frame_face_name_list = []
+                CAM.detected_names = []
+            else:
+                CAM.current_frame_face_name_list = []
+                names_with_dist = []
 
+                for i, face in enumerate(faces):
+                    CAM.current_frame_face_centroid_list.append(
+                        [(face.left() + face.right()) / 2, (face.top() + face.bottom()) / 2]
+                    )
+                    shape = _predictor(frame, face)
+                    feat  = _reco_model.compute_face_descriptor(frame, shape)
+                    name, dist = CAM.recognize(feat)
+                    CAM.current_frame_face_name_list.append(name)
+                    names_with_dist.append({"name": name, "e_dist": round(dist, 4)})
+
+                    # 写识别日志（带冷却）
+                    if name != "unknown":
+                        now = time.time()
+                        if now - COOLDOWN.get(name, 0) > 60:
+                            ts   = time.strftime("%Y%m%d_%H%M%S")
+                            snap = os.path.join(SNAPSHOT_DIR, f"{name}_{ts}.jpg")
+                            safe_imwrite(snap, frame)
+                            add_recognition_log(name, round(dist, 4), CAM.camera_id, snap)
+                            COOLDOWN[name] = now
+
+                CAM.detected_names = names_with_dist
+
+        # 更新质心历史
+        CAM.last_frame_face_centroid_list = list(CAM.current_frame_face_centroid_list)
+        CAM.last_frame_face_name_list     = list(CAM.current_frame_face_name_list)
+
+        # 同步 detected_names（场景一追踪后更新）
+        if cur_cnt > 0 and len(CAM.current_frame_face_name_list) == cur_cnt:
+            CAM.detected_names = [
+                {"name": CAM.current_frame_face_name_list[i], "e_dist": 0}
+                if i >= len(CAM.detected_names)
+                else {"name": CAM.current_frame_face_name_list[i],
+                      "e_dist": CAM.detected_names[i].get("e_dist", 0)
+                              if i < len(CAM.detected_names) else 0}
+                for i in range(cur_cnt)
+            ]
+
+        # ── 绘制 ──
         draw_frame = frame.copy()
         for i, d in enumerate(faces):
-            color = (0, 255, 128) if i < len(names_this_frame) and names_this_frame[i]["name"] != "unknown" else (80, 80, 255)
+            name  = CAM.current_frame_face_name_list[i] if i < len(CAM.current_frame_face_name_list) else "unknown"
+            color = (0, 255, 128) if name != "unknown" else (80, 80, 255)
             cv2.rectangle(draw_frame, (d.left(), d.top()), (d.right(), d.bottom()), color, 2)
+            # 四角标记
             sz = 12
-            for dx, dy in [(-1,-1),(1,-1),(1,1),(-1,1)]:
-                cx = d.right() if dx == 1 else d.left()
-                cy = d.bottom() if dy == 1 else d.top()
-                cv2.line(draw_frame, (cx, cy), (cx + dx*sz, cy), color, 2)
-                cv2.line(draw_frame, (cx, cy), (cx, cy + dy*sz), color, 2)
-            if i < len(names_this_frame):
-                label = names_this_frame[i]["name"]
-                if font_ch:
-                    pil_img = Image.fromarray(cv2.cvtColor(draw_frame, cv2.COLOR_BGR2RGB))
-                    d_draw  = ImageDraw.Draw(pil_img)
-                    d_draw.text((d.left(), d.bottom() + 6), label, font=font_ch,
-                                fill=(0, 255, 128) if label != "unknown" else (80, 80, 255))
-                    draw_frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-                else:
-                    cv2.putText(draw_frame, label, (d.left(), d.bottom() + 22),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 1)
+            for ddx, ddy in [(-1,-1),(1,-1),(1,1),(-1,1)]:
+                cx = d.right() if ddx == 1 else d.left()
+                cy = d.bottom() if ddy == 1 else d.top()
+                cv2.line(draw_frame, (cx, cy), (cx + ddx*sz, cy), color, 2)
+                cv2.line(draw_frame, (cx, cy), (cx, cy + ddy*sz), color, 2)
+            # 名字
+            if font_ch:
+                pil_img = Image.fromarray(cv2.cvtColor(draw_frame, cv2.COLOR_BGR2RGB))
+                d_draw  = ImageDraw.Draw(pil_img)
+                d_draw.text((d.left(), d.bottom() + 6), name, font=font_ch,
+                            fill=(0, 255, 128) if name != "unknown" else (80, 80, 255))
+                draw_frame = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+            else:
+                cv2.putText(draw_frame, name, (d.left(), d.bottom() + 22),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 1)
 
-        cv2.putText(draw_frame, f"人脸数: {cur_cnt}", (14, 28),
+        cv2.putText(draw_frame, f"Faces: {cur_cnt}", (14, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 128), 1)
 
         _, buf = cv2.imencode('.jpg', draw_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -378,8 +479,11 @@ def register_feed():
 def register_set_name():
     data = request.json or {}
     name = (data.get('name') or '').strip()
+    # 空名称时仅重置当前录入对象（录入下一个人用）
     if not name:
-        return jsonify(ok=False, msg="姓名不能为空"), 400
+        REG.current_name = ''
+        REG.save_count = 0
+        return jsonify(ok=True, save_count=0)
     folder = os.path.join(FACES_DIR, f"person_{name}")
     os.makedirs(folder, exist_ok=True)
     REG.current_name = name
@@ -413,19 +517,26 @@ def register_capture():
     os.makedirs(folder, exist_ok=True)
     REG.save_count += 1
     filename = f"img_face_{REG.save_count}.jpg"
-    cv2.imwrite(os.path.join(folder, filename), raw)
+    # 使用 safe_imwrite 避免 Windows 中文路径乱码问题
+    safe_imwrite(os.path.join(folder, filename), raw)
     increment_photo_count(REG.current_name, 1)
     return jsonify(ok=True, save_count=REG.save_count, filename=filename)
 
 @app.route('/api/register/extract_features', methods=['POST'])
 def register_extract_features():
     try:
+        # 显式指定 UTF-8 编码环境，避免 Windows 下子进程编码问题
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+        env['PYTHONUTF8'] = '1'
         result = subprocess.run(
-            [sys.executable, "features_extraction_to_csv.py"],
-            capture_output=True, text=True, timeout=120
+            [sys.executable, "-X", "utf8", "features_extraction_to_csv.py"],
+            capture_output=True, text=True, timeout=120,
+            encoding='utf-8', errors='replace', env=env
         )
         if result.returncode != 0:
-            return jsonify(ok=False, msg=result.stderr[:500]), 500
+            err_msg = result.stderr[:800] if result.stderr else result.stdout[:800]
+            return jsonify(ok=False, msg=err_msg), 500
         ok = CAM.load_features()
         return jsonify(ok=True, msg="特征提取完成，已重载特征库",
                        count=len(CAM.known_names))
@@ -475,6 +586,8 @@ def persons_delete(name):
     if os.path.isdir(folder):
         shutil.rmtree(folder)
     delete_person(name)
+    # 删除人员后立即重载特征库，避免识别缓存残留
+    CAM.load_features()
     return jsonify(ok=True)
 
 @app.route('/api/persons/<name>/photos', methods=['GET'])
@@ -485,6 +598,53 @@ def persons_photos(name):
     files = [f for f in os.listdir(folder) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
     return jsonify(files)
 
+# ── 新增：上传照片 API（支持新增/编辑人员时上传照片）──
+@app.route('/api/persons/<name>/upload_photo', methods=['POST'])
+def upload_photo(name):
+    """
+    为指定姓名的人员上传一张或多张照片。
+    前端通过 multipart/form-data 发送，字段名为 photos（可多文件）。
+    """
+    if 'photos' not in request.files:
+        return jsonify(ok=False, msg="未收到照片文件"), 400
+
+    existing = get_person_by_name(name)
+    if existing is None:
+        return jsonify(ok=False, msg=f"人员 '{name}' 不存在，请先创建"), 404
+
+    folder = os.path.join(FACES_DIR, f"person_{name}")
+    os.makedirs(folder, exist_ok=True)
+
+    # 计算当前已有照片数量，续号保存
+    existing_photos = [f for f in os.listdir(folder)
+                       if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+    start_idx = len(existing_photos) + 1
+
+    saved = 0
+    files = request.files.getlist('photos')
+    for i, file in enumerate(files):
+        if file and file.filename:
+            ext = os.path.splitext(file.filename)[1].lower() or '.jpg'
+            filename = f"img_face_{start_idx + i}{ext}"
+            save_path = os.path.join(folder, filename)
+            # 用 PIL 读取并保存，避免 Windows 中文路径问题
+            try:
+                pil_img = Image.open(file.stream).convert('RGB')
+                pil_img.save(save_path)
+                saved += 1
+            except Exception as e:
+                logging.error("上传照片失败 %s: %s", filename, e)
+
+    if saved > 0:
+        # 更新数据库中的照片数
+        total = len([f for f in os.listdir(folder)
+                     if f.lower().endswith(('.jpg', '.png', '.jpeg'))])
+        update_person(name, photo_count=total)
+
+    return jsonify(ok=True, saved=saved,
+                   total=len([f for f in os.listdir(folder)
+                               if f.lower().endswith(('.jpg', '.png', '.jpeg'))]))
+
 @app.route('/api/persons/photos/<name>/<filename>')
 def serve_photo(name, filename):
     folder = os.path.join(FACES_DIR, f"person_{name}")
@@ -494,6 +654,10 @@ def serve_photo(name, filename):
 def reload_features():
     ok = CAM.load_features()
     return jsonify(ok=ok, count=len(CAM.known_names))
+
+@app.route('/api/features/count', methods=['GET'])
+def features_count():
+    return jsonify(count=len(CAM.known_names))
 
 @app.route('/api/persons/sync', methods=['POST'])
 def persons_sync():
@@ -532,7 +696,8 @@ def logs_stats():
 
 @app.route('/api/logs/export', methods=['GET'])
 def logs_export():
-    tmp = f"/tmp/logs_{int(time.time())}.csv"
+    import tempfile
+    tmp = os.path.join(tempfile.gettempdir(), f"logs_{int(time.time())}.csv")
     name    = request.args.get('name') or None
     start_s = request.args.get('start') or None
     end_s   = request.args.get('end')   or None
@@ -551,6 +716,22 @@ def logs_export():
     os.unlink(tmp)
     return Response(data, mimetype='text/csv',
                     headers={"Content-Disposition": "attachment; filename=recognition_logs.csv"})
+
+@app.route('/api/logs/clear', methods=['POST'])
+def logs_clear():
+    from db_manager import get_connection
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM recognition_logs")
+            cnt = cur.fetchone()[0]
+            cur.execute("DELETE FROM recognition_logs")
+        conn.commit()
+        return jsonify(ok=True, deleted=cnt)
+    except Exception as e:
+        return jsonify(ok=False, msg=str(e)), 500
+    finally:
+        conn.close()
 
 @app.route('/api/snapshots/<filename>')
 def serve_snapshot(filename):
