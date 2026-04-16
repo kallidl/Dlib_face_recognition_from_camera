@@ -1,0 +1,17 @@
+.env
+data/data_faces_from_camera/data/snapshots/
+data/features all.csv 
+__pycache__/
+*.pyc
+# 数据文件
+data/data_faces_from_camera/
+data/snapshots/
+data/features_all.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 环境
+.env

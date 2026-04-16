@@ -9,7 +9,7 @@ import dlib
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
-from db_manager import (
+from app.db_manager import (
     init_db, add_person, update_person, delete_person,
     get_all_persons, search_persons, get_person_by_name,
     increment_photo_count, add_recognition_log,
@@ -17,7 +17,7 @@ from db_manager import (
 )
 
 # ─────────────────────────────────────────
-app = Flask(__name__)
+app = Flask(__name__, template_folder="../templates", static_folder="../static")
 logging.basicConfig(level=logging.INFO)
 
 FACES_DIR     = "data/data_faces_from_camera/"
@@ -272,7 +272,7 @@ def _camera_loop():
     cam_id = CAM.cap
 
     try:
-        font_ch = ImageFont.truetype("simsun.ttc", 28)
+        font_ch = ImageFont.truetype("static/fonts/simsun.ttc", 28)
     except Exception:
         font_ch = None
 

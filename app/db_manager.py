@@ -1,19 +1,23 @@
 # db_manager.py
 # MySQL 数据库管理模块 / MySQL database manager
 
-
 import pymysql
 import logging
 from datetime import datetime
+from dotenv import load_dotenv
+import os
+
+
 
 # ============================================================
 # 数据库连接配置 / Database connection config — 按需修改
 # ============================================================
+load_dotenv()
 DB_CONFIG = {
     "host":     "localhost",
     "port":     3306,
     "user":     "root",
-    "password": "Aa@@123456",   # ← 修改为你的密码
+    "password": os.getenv("DB_PASSWORD"),   # ← 修改为你的密码
     "database": "face_reco_db",    # ← 数据库名，会自动创建
     "charset":  "utf8mb4",
 }
