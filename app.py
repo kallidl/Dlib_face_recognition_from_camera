@@ -9,7 +9,6 @@ import dlib
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
-
 from db_manager import (
     init_db, add_person, update_person, delete_person,
     get_all_persons, search_persons, get_person_by_name,
@@ -108,31 +107,31 @@ class CameraState:
         self.current_frame   = None
         self.face_count      = 0
         self.detected_names  = []
-        self.last_cnt        = 0
-        self.reclassify_cnt  = 0
-        self.reclassify_interval = 10
         self.known_features  = []
         self.known_names     = []
         self.camera_id       = 0
-        # OT 追踪状态
-        self.last_frame_face_centroid_list  = []
+        # OT 追踪状态 —— 严格对齐 face_reco_from_camera_ot.py
+        self.last_frame_face_centroid_list    = []
         self.current_frame_face_centroid_list = []
-        self.last_frame_face_name_list      = []
-        self.current_frame_face_name_list   = []
-        self.last_frame_face_cnt            = 0
-        self.reclassify_interval_cnt        = 0
+        self.last_frame_face_name_list        = []
+        self.current_frame_face_name_list     = []
+        self.last_frame_face_cnt              = 0   # 上一帧人脸数
+        self.current_frame_face_cnt           = 0   # 当前帧人脸数
+        self.reclassify_interval_cnt          = 0
+        self.reclassify_interval              = 10
 
     def load_features(self):
         """加载特征库，同时重置OT追踪状态和识别缓存，确保删除人员后立即生效"""
         self.known_features, self.known_names = [], []
         # 重置OT状态，避免旧名字残留
-        self.last_frame_face_centroid_list  = []
+        self.last_frame_face_centroid_list    = []
         self.current_frame_face_centroid_list = []
-        self.last_frame_face_name_list      = []
-        self.current_frame_face_name_list   = []
-        self.last_frame_face_cnt            = 0
-        self.reclassify_interval_cnt        = 0
-        self.detected_names                 = []
+        self.last_frame_face_name_list        = []
+        self.current_frame_face_name_list     = []
+        self.last_frame_face_cnt              = 0
+        self.current_frame_face_cnt           = 0
+        self.reclassify_interval_cnt          = 0
+        self.detected_names                   = []
 
         csv_path = "data/features_all.csv"
         if not os.path.exists(csv_path):
@@ -261,10 +260,12 @@ def _gen_register_frames():
 # ─────────────────────────────────────────
 def _camera_loop():
     """
-    使用 OT（质心追踪）算法的识别循环：
-    - 人脸数变化 或 reclassify_interval 到达时，才做完整识别（计算特征描述子）
-    - 其余帧只做检测 + 质心追踪，大幅提升 FPS
-    - load_features() 时已重置 OT 状态，保证删除人员后立即生效
+    使用 OT（质心追踪）算法的识别循环。
+    严格对齐 face_reco_from_camera_ot.py 的帧间状态管理逻辑：
+      - 每帧开头先保存上帧计数，再更新当前帧计数
+      - 场景1（人脸数不变且不需重识别）：只做检测+质心追踪，不调用 compute_face_descriptor
+      - 场景2（人脸数变化或到达重识别间隔）：先提取全部特征再识别
+    修复：开启摄像头时画面里已有人脸也能立即识别；消除识别瞬间卡顿。
     """
     load_dlib()
     CAM.load_features()
@@ -283,51 +284,60 @@ def _camera_loop():
             break
 
         faces = _detector(frame, 0)
-        cur_cnt = len(faces)
 
-        # 更新帧间状态
-        CAM.last_frame_face_cnt = cur_cnt  # 用完立刻更新（下面判断前先保存上帧值）
-        last_cnt_snapshot = CAM.last_cnt
-        CAM.last_cnt = cur_cnt
+        # ── 严格按 OT 版本：先保存上帧数，再更新当前帧数 ──
+        CAM.last_frame_face_cnt    = CAM.current_frame_face_cnt
+        CAM.current_frame_face_cnt = len(faces)
 
-        # ── 场景一：人脸数不变 且 不需要重识别 ──
-        if cur_cnt == last_cnt_snapshot and CAM.reclassify_interval_cnt != CAM.reclassify_interval:
-            if "unknown" in [x.get("name") for x in CAM.detected_names]:
+        # 保存上帧名字列表和质心列表，清空当前帧质心列表
+        CAM.last_frame_face_name_list         = CAM.current_frame_face_name_list[:]
+        CAM.last_frame_face_centroid_list      = CAM.current_frame_face_centroid_list[:]
+        CAM.current_frame_face_centroid_list   = []
+
+        # ── 场景1：人脸数不变 且 不需要重识别 ──
+        if (CAM.current_frame_face_cnt == CAM.last_frame_face_cnt and
+                CAM.reclassify_interval_cnt != CAM.reclassify_interval):
+
+            if "unknown" in CAM.current_frame_face_name_list:
                 CAM.reclassify_interval_cnt += 1
 
-            CAM.current_frame_face_centroid_list = []
-            if cur_cnt > 0:
+            if CAM.current_frame_face_cnt != 0:
                 for d in faces:
                     CAM.current_frame_face_centroid_list.append(
                         [(d.left() + d.right()) / 2, (d.top() + d.bottom()) / 2]
                     )
-                # 多人脸时用质心追踪复用上帧识别结果
-                if cur_cnt != 1 and len(CAM.last_frame_face_centroid_list) == cur_cnt:
+                # 多人脸时用质心追踪复用上帧识别结果（单人脸不需要追踪，名字直接继承）
+                if CAM.current_frame_face_cnt != 1:
                     CAM.centroid_tracker()
 
-        # ── 场景二：人脸数变化 或 需要重识别 ──
+        # ── 场景2：人脸数变化 或 到达重识别间隔 ──
         else:
             CAM.reclassify_interval_cnt = 0
-            CAM.current_frame_face_centroid_list = []
 
-            if cur_cnt == 0:
+            if CAM.current_frame_face_cnt == 0:
                 CAM.current_frame_face_name_list = []
                 CAM.detected_names = []
             else:
                 CAM.current_frame_face_name_list = []
                 names_with_dist = []
 
-                for i, face in enumerate(faces):
+                # 先提取所有人脸的特征，再逐一识别（对齐 OT 版本的两步分离写法）
+                face_features = []
+                for face in faces:
                     CAM.current_frame_face_centroid_list.append(
                         [(face.left() + face.right()) / 2, (face.top() + face.bottom()) / 2]
                     )
                     shape = _predictor(frame, face)
                     feat  = _reco_model.compute_face_descriptor(frame, shape)
+                    face_features.append(feat)
+                    CAM.current_frame_face_name_list.append("unknown")
+
+                for k, feat in enumerate(face_features):
                     name, dist = CAM.recognize(feat)
-                    CAM.current_frame_face_name_list.append(name)
+                    CAM.current_frame_face_name_list[k] = name
                     names_with_dist.append({"name": name, "e_dist": round(dist, 4)})
 
-                    # 写识别日志（带冷却）
+                    # 写识别日志（带冷却，60秒内同一人不重复写入）
                     if name != "unknown":
                         now = time.time()
                         if now - COOLDOWN.get(name, 0) > 60:
@@ -339,35 +349,31 @@ def _camera_loop():
 
                 CAM.detected_names = names_with_dist
 
-        # 更新质心历史
-        CAM.last_frame_face_centroid_list = list(CAM.current_frame_face_centroid_list)
-        CAM.last_frame_face_name_list     = list(CAM.current_frame_face_name_list)
-
-        # 同步 detected_names（场景一追踪后更新）
-        if cur_cnt > 0 and len(CAM.current_frame_face_name_list) == cur_cnt:
+        # 场景1 追踪后同步 detected_names（保留已有的 e_dist）
+        if (CAM.current_frame_face_cnt != 0 and
+                len(CAM.current_frame_face_name_list) == CAM.current_frame_face_cnt):
             CAM.detected_names = [
-                {"name": CAM.current_frame_face_name_list[i], "e_dist": 0}
-                if i >= len(CAM.detected_names)
-                else {"name": CAM.current_frame_face_name_list[i],
-                      "e_dist": CAM.detected_names[i].get("e_dist", 0)
-                              if i < len(CAM.detected_names) else 0}
-                for i in range(cur_cnt)
+                {"name": CAM.current_frame_face_name_list[i],
+                 "e_dist": CAM.detected_names[i].get("e_dist", 0)
+                           if i < len(CAM.detected_names) else 0}
+                for i in range(CAM.current_frame_face_cnt)
             ]
 
         # ── 绘制 ──
         draw_frame = frame.copy()
         for i, d in enumerate(faces):
-            name  = CAM.current_frame_face_name_list[i] if i < len(CAM.current_frame_face_name_list) else "unknown"
+            name  = (CAM.current_frame_face_name_list[i]
+                     if i < len(CAM.current_frame_face_name_list) else "unknown")
             color = (0, 255, 128) if name != "unknown" else (80, 80, 255)
             cv2.rectangle(draw_frame, (d.left(), d.top()), (d.right(), d.bottom()), color, 2)
             # 四角标记
             sz = 12
-            for ddx, ddy in [(-1,-1),(1,-1),(1,1),(-1,1)]:
+            for ddx, ddy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
                 cx = d.right() if ddx == 1 else d.left()
                 cy = d.bottom() if ddy == 1 else d.top()
-                cv2.line(draw_frame, (cx, cy), (cx + ddx*sz, cy), color, 2)
-                cv2.line(draw_frame, (cx, cy), (cx, cy + ddy*sz), color, 2)
-            # 名字
+                cv2.line(draw_frame, (cx, cy), (cx + ddx * sz, cy), color, 2)
+                cv2.line(draw_frame, (cx, cy), (cx, cy + ddy * sz), color, 2)
+            # 姓名（优先使用中文字体）
             if font_ch:
                 pil_img = Image.fromarray(cv2.cvtColor(draw_frame, cv2.COLOR_BGR2RGB))
                 d_draw  = ImageDraw.Draw(pil_img)
@@ -378,13 +384,13 @@ def _camera_loop():
                 cv2.putText(draw_frame, name, (d.left(), d.bottom() + 22),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 1)
 
-        cv2.putText(draw_frame, f"Faces: {cur_cnt}", (14, 28),
+        cv2.putText(draw_frame, f"Faces: {CAM.current_frame_face_cnt}", (14, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 128), 1)
 
         _, buf = cv2.imencode('.jpg', draw_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         with CAM.lock:
             CAM.current_frame = buf.tobytes()
-            CAM.face_count    = cur_cnt
+            CAM.face_count    = CAM.current_frame_face_cnt
 
     cam_id.release()
     CAM.running = False
