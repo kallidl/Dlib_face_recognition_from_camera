@@ -215,7 +215,7 @@ def _register_loop():
         for d in faces:
             h = d.bottom() - d.top()
             w = d.right() - d.left()
-            hh, ww = h // 2, w // 2
+            hh, ww = h // 4, w // 4  # 修改：外围框缩小（原来是 h//2, w//2），避免人脸靠近边缘时超出范围
             if (d.right() + ww > frame.shape[1] or d.bottom() + hh > frame.shape[0]
                     or d.left() - ww < 0 or d.top() - hh < 0):
                 color = (80, 80, 255)

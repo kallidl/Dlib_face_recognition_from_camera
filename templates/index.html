@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>人脸识别系统</title>
 <style>
+  /* ── 整体缩放 125% ── */
+  html { font-size: 110%; zoom: 1.1; }
+
   :root {
     --bg:        #070d14;
     --bg2:       #0c1520;
@@ -264,20 +267,23 @@
 <div class="main page" id="page-reg">
   <div class="reg-layout">
     <div>
-      <div class="video-wrap" id="regVideoWrap">
-        <div class="video-placeholder" id="regPlaceholder">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="7" width="15" height="10" rx="2"/><path d="m17 9 5-2v10l-5-2"/></svg>
-          <div>录入摄像头未开启</div>
-        </div>
-        <img id="regFeed" src="" style="display:none" alt="录入视频流">
-      </div>
-      <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+      <!-- ★ 摄像头选择栏移到最顶部 ★ -->
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
         <select id="regCamSelect" style="flex:1">
           <option value="0">摄像头 0（默认）</option>
         </select>
         <button class="btn btn-outline" onclick="refreshCamList()" style="padding:6px 10px" title="刷新">↻</button>
         <button class="btn btn-primary" id="btnRegStart" onclick="regCamStart()">▶ 开启摄像头</button>
         <button class="btn btn-danger"  id="btnRegStop"  onclick="regCamStop()" disabled>■ 停止</button>
+      </div>
+
+      <!-- 视频画面 -->
+      <div class="video-wrap" id="regVideoWrap">
+        <div class="video-placeholder" id="regPlaceholder">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><rect x="2" y="7" width="15" height="10" rx="2"/><path d="m17 9 5-2v10l-5-2"/></svg>
+          <div>录入摄像头未开启</div>
+        </div>
+        <img id="regFeed" src="" style="display:none" alt="录入视频流">
       </div>
     </div>
 
@@ -383,7 +389,6 @@
     <div class="form-row"><label>姓名 *</label><input id="addName" placeholder="姓名"></div>
     <div class="form-row"><label>工号</label><input id="addEmpId" placeholder="工号"></div>
     <div class="form-row"><label>部门</label><input id="addDept" placeholder="部门"></div>
-    <!-- 照片上传区 -->
     <div class="form-row" style="margin-top:8px">
       <label>上传人脸照片（可选，支持多张）</label>
       <div id="addPhotoDropzone" onclick="document.getElementById('addPhotoInput').click()"
@@ -411,14 +416,12 @@
     <div class="form-row"><label>姓名（不可修改）</label><input id="editName" readonly style="opacity:.5"></div>
     <div class="form-row"><label>工号</label><input id="editEmpId" placeholder="工号"></div>
     <div class="form-row"><label>部门</label><input id="editDept" placeholder="部门"></div>
-    <!-- 已有照片展示区 -->
     <div class="form-row" style="margin-top:8px" id="existingPhotosRow">
       <label>已有人脸照片</label>
       <div id="existingPhotosList" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;min-height:32px">
         <span style="color:var(--text-dim);font-size:11px">加载中...</span>
       </div>
     </div>
-    <!-- 照片上传区 -->
     <div class="form-row" style="margin-top:8px">
       <label>追加人脸照片（可选，支持多张）</label>
       <div id="editPhotoDropzone" onclick="document.getElementById('editPhotoInput').click()"
@@ -465,11 +468,9 @@ function goto(page) {
 }
 
 function resetRegPage() {
-  // 清空输入框
   document.getElementById('regName').value = '';
   document.getElementById('regEmpId').value = '';
   document.getElementById('regDept').value = '';
-  // 重置计数器和提示
   document.getElementById('captureCount').textContent = '0';
   const tip = document.getElementById('regNameTip');
   tip.style.display = 'none';
@@ -478,11 +479,9 @@ function resetRegPage() {
   const et = document.getElementById('extractTip');
   et.style.display = 'none';
   et.textContent = '';
-  // 重置按钮状态
   const btn = document.getElementById('btnExtract');
   btn.disabled = false;
   btn.textContent = '⚙ 提取特征并更新特征库';
-  // 根据摄像头状态控制三步骤可用性
   setRegStepsEnabled(regRunning);
 }
 
@@ -517,7 +516,6 @@ async function pollStatus() {
       ? '<span class="tag tag-on">运行中</span>'
       : '<span class="tag tag-off">已停止</span>';
 
-    // 识别结果
     const rl = document.getElementById('resultList');
     if (!d.running) {
       rl.innerHTML = '<div style="color:var(--text-dim);font-size:11px;text-align:center;padding:16px">摄像头未开启</div>';
@@ -530,7 +528,6 @@ async function pollStatus() {
             <div class="result-dist">e-dist: ${x.e_dist}</div>
           </div>
         </div>`).join('');
-      // 更新识别历史（最多保留5条，unknown 不计入）
       const validNames = d.detected.filter(x => x.name !== 'unknown');
       if (validNames.length > 0) {
         const hl = document.getElementById('historyList');
@@ -538,7 +535,7 @@ async function pollStatus() {
         validNames.forEach(x => {
           const existing = Array.from(hl.querySelectorAll('.history-name'))
             .find(el => el.textContent === x.name);
-          if (existing) return; // 同名在历史里已有则跳过
+          if (existing) return;
           const item = document.createElement('div');
           item.style.cssText = 'display:flex;align-items:center;gap:8px;padding:5px 8px;background:var(--bg3);border-radius:var(--radius);border-left:2px solid var(--accent2)';
           item.innerHTML = `<span style="width:22px;height:22px;border-radius:50%;background:var(--accent2);color:#000;font-weight:bold;font-size:11px;display:flex;align-items:center;justify-content:center;flex-shrink:0">${x.name[0]}</span><span class="history-name" style="color:var(--accent2);font-size:12px;font-weight:bold;flex:1">${x.name}</span><span style="color:var(--text-dim);font-size:10px">${now}</span>`;
@@ -552,7 +549,6 @@ async function pollStatus() {
     }
   } catch(e) {}
 
-  // 更新特征库人数显示（摄像头识别页）
   try {
     const rf = await fetch('/api/features/count');
     const df = await rf.json();
@@ -566,7 +562,6 @@ async function pollStatus() {
     const r2 = await fetch('/api/register/camera/status');
     const d2 = await r2.json();
     regRunning = d2.running;
-    // 录入摄像头开启时右上角显示"录入中"（识别摄像头未开启时）
     if (!camRunning) {
       document.getElementById('statusDot').className  = 'dot' + (d2.running ? ' online' : '');
       document.getElementById('statusText').textContent = d2.running ? '录入中' : '离线';
@@ -574,7 +569,6 @@ async function pollStatus() {
     document.getElementById('sysReg').innerHTML = d2.running
       ? '<span class="tag tag-on">运行中</span>'
       : '<span class="tag tag-off">已停止</span>';
-    // 控制录入页三步骤的可用状态
     setRegStepsEnabled(d2.running);
     if (d2.running) {
       document.getElementById('captureCount').textContent = d2.save_count;
@@ -663,7 +657,6 @@ async function reloadFeatures() {
   }
 }
 
-// 控制录入页三步骤的启用/禁用状态
 function setRegStepsEnabled(enabled) {
   ['regStep1','regStep2','regStep3'].forEach(id => {
     const el = document.getElementById(id);
@@ -671,17 +664,9 @@ function setRegStepsEnabled(enabled) {
     el.style.opacity = enabled ? '1' : '0.4';
     el.style.pointerEvents = enabled ? '' : 'none';
   });
-  if (!enabled) {
-    const tip = document.getElementById('regNameTip');
-    if (tip.style.display === 'none') {
-      // 只在未确认姓名时显示提示
-    }
-  }
 }
 
-// 录入下一个人：清空姓名和计数，保持摄像头开启
 async function regNextPerson() {
-  // 重置服务端当前录入姓名
   try {
     await fetch('/api/register/set_name', {
       method: 'POST',
@@ -689,7 +674,6 @@ async function regNextPerson() {
       body: JSON.stringify({name: '', employee_id: '', department: ''})
     });
   } catch(e) {}
-  // 重置前端状态
   document.getElementById('regName').value = '';
   document.getElementById('regEmpId').value = '';
   document.getElementById('regDept').value = '';
@@ -836,7 +820,6 @@ async function loadPersons(q='') {
   }
 }
 
-// 照片预览辅助函数
 function previewPhotos(input, previewId, countId) {
   const preview = document.getElementById(previewId);
   const countEl = document.getElementById(countId);
@@ -858,7 +841,6 @@ function previewPhotos(input, previewId, countId) {
   countEl.textContent = files.length > 0 ? `已选择 ${files.length} 张照片` : '';
 }
 
-// 上传照片到服务器
 async function uploadPhotos(name, inputId) {
   const input = document.getElementById(inputId);
   if (!input.files.length) return {saved: 0};
@@ -895,7 +877,6 @@ async function addPerson() {
   btn.textContent = '处理中...';
 
   try {
-    // 1. 创建人员
     const r = await fetch('/api/persons', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
@@ -904,7 +885,6 @@ async function addPerson() {
     const d = await r.json();
     if (!d.ok) { toast(d.msg || '添加失败', 'err'); return; }
 
-    // 2. 上传照片（如果有）
     const photoInput = document.getElementById('addPhotoInput');
     if (photoInput.files.length > 0) {
       const up = await uploadPhotos(name, 'addPhotoInput');
@@ -933,7 +913,6 @@ function editPerson(name, empId, dept) {
   document.getElementById('editPhotoPreview').innerHTML = '';
   document.getElementById('editPhotoCount').textContent = '';
   document.getElementById('editPersonModal').classList.add('show');
-  // 加载已有照片
   loadExistingPhotos(name);
 }
 
@@ -974,7 +953,6 @@ async function loadExistingPhotos(name) {
   }
 }
 
-// 照片查看器
 function showPhotoViewer(src, name, fname) {
   let overlay = document.getElementById('photoViewerOverlay');
   if (!overlay) {
@@ -1007,7 +985,6 @@ async function savePerson() {
   btn.textContent = '保存中...';
 
   try {
-    // 1. 更新基本信息
     const r = await fetch(`/api/persons/${encodeURIComponent(name)}`, {
       method: 'PUT',
       headers: {'Content-Type':'application/json'},
@@ -1016,7 +993,6 @@ async function savePerson() {
     const d = await r.json();
     if (!d.ok) { toast('保存失败', 'err'); return; }
 
-    // 2. 上传照片（如果有）
     const photoInput = document.getElementById('editPhotoInput');
     if (photoInput.files.length > 0) {
       const up = await uploadPhotos(name, 'editPhotoInput');
@@ -1044,7 +1020,6 @@ async function deletePerson(name) {
   if (d.ok) {
     toast(`已删除：${name}，正在更新特征库...`, 'warn');
     loadPersons();
-    // 删除后自动重提取特征，彻底清除旧缓存
     try {
       const er = await fetch('/api/register/extract_features', {method:'POST'});
       const ed = await er.json();
@@ -1160,7 +1135,6 @@ function escHtml(s) {
 (async function init() {
   await refreshCamList();
   loadDash();
-  // 自动同步文件系统到数据库
   try {
     await fetch('/api/persons/sync', {method:'POST'});
   } catch(e) {}
