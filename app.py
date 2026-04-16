@@ -141,9 +141,9 @@ class CameraState:
         if os.path.getsize(csv_path) == 0:
             return True
         try:
-            df = pd.read_csv(csv_path, header=None)
+            df = pd.read_csv(csv_path, header=None, dtype=str)
             for i in range(df.shape[0]):
-                self.known_names.append(df.iloc[i][0])
+                self.known_names.append(str(df.iloc[i][0]))
                 arr = [df.iloc[i][j] if df.iloc[i][j] != '' else '0' for j in range(1, 129)]
                 self.known_features.append(arr)
         except Exception as e:
@@ -167,7 +167,7 @@ class CameraState:
                 dists.append(9999.0)
         min_d = min(dists)
         idx   = dists.index(min_d)
-        name  = self.known_names[idx] if min_d < 0.4 else "unknown"
+        name  = str(self.known_names[idx]) if min_d < 0.4 else "unknown"
         return name, min_d
 
     def centroid_tracker(self):
@@ -419,6 +419,14 @@ def camera_start():
     data = request.json or {}
     cam_id = int(data.get('camera_id', 0))
     CAM.camera_id = cam_id
+    # 先释放旧的 cap，避免停止后再开时黑屏
+    if CAM.cap is not None:
+        try:
+            CAM.cap.release()
+        except Exception:
+            pass
+        CAM.cap = None
+    CAM.current_frame = None  # 清除旧帧
     CAM.cap = cv2.VideoCapture(cam_id)
     if not CAM.cap.isOpened():
         return jsonify(ok=False, msg="无法打开摄像头"), 500
