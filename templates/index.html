@@ -877,6 +877,23 @@ async function addPerson() {
   btn.textContent = '处理中...';
 
   try {
+    // 1. 先检测照片中是否含有人脸
+    const photoInput = document.getElementById('addPhotoInput');
+    let faceCheckResult = null;
+    if (photoInput.files.length > 0) {
+      btn.textContent = '检测人脸中...';
+      const fd = new FormData();
+      Array.from(photoInput.files).forEach(f => fd.append('photos', f));
+      try {
+        const cr = await fetch('/api/persons/check_photos_faces', { method: 'POST', body: fd });
+        faceCheckResult = await cr.json();
+      } catch(e) {
+        toast('人脸检测请求失败，将跳过检测直接添加', 'warn');
+      }
+    }
+
+    // 2. 创建人员记录
+    btn.textContent = '创建人员...';
     const r = await fetch('/api/persons', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
@@ -885,15 +902,49 @@ async function addPerson() {
     const d = await r.json();
     if (!d.ok) { toast(d.msg || '添加失败', 'err'); return; }
 
-    const photoInput = document.getElementById('addPhotoInput');
+    // 3. 上传照片 & 根据人脸检测结果给出提示
     if (photoInput.files.length > 0) {
-      const up = await uploadPhotos(name, 'addPhotoInput');
-      if (up.saved > 0) {
-        toast(`已添加：${name}，已上传 ${up.saved} 张照片，正在后台提取特征...`, 'ok');
-        // ✅ 后端 upload_photo 接口已自动异步触发特征提取，约10~60秒后生效
-        // 提取完成后特征库人数将自动更新，无需手动重载
+      // 重新构造 FormData 上传（check 时已经 read，需要再次上传原始 files）
+      const fd2 = new FormData();
+      Array.from(photoInput.files).forEach(f => fd2.append('photos', f));
+      const up = await fetch(`/api/persons/${encodeURIComponent(name)}/upload_photo`, {
+        method: 'POST', body: fd2
+      });
+      const upData = await up.json();
+
+      if (faceCheckResult && faceCheckResult.ok) {
+        const noFace = faceCheckResult.no_face_count;
+        const hasFace = faceCheckResult.has_face_count;
+        const total = faceCheckResult.total;
+
+        if (hasFace === 0) {
+          // 所有照片均无人脸
+          toast(`已添加：${name}，但上传的 ${total} 张照片均未检测到人脸，无特征提取`, 'err');
+          // 在模态框内也显示警告
+          const countEl = document.getElementById('addPhotoCount');
+          countEl.style.color = 'var(--danger)';
+          countEl.textContent = `⚠ ${total} 张照片均未检测到人脸，无法提取特征，请重新上传含人脸的照片`;
+          closeModal('addPersonModal');
+          loadPersons();
+          return;
+        } else if (noFace > 0) {
+          // 部分照片无人脸
+          const noFaceNames = faceCheckResult.results
+            .filter(r => !r.has_face)
+            .map(r => r.filename)
+            .join('、');
+          toast(`已添加：${name}，${hasFace} 张含人脸，${noFace} 张无人脸（${noFaceNames}），正在后台提取特征...`, 'warn');
+        } else {
+          // 所有照片均有人脸
+          toast(`已添加：${name}，已上传 ${upData.saved || hasFace} 张照片，正在后台提取特征...`, 'ok');
+        }
       } else {
-        toast(`已添加：${name}（照片上传失败，请在人脸录入页补充）`, 'warn');
+        // 检测接口异常，按原逻辑处理
+        if (upData && upData.saved > 0) {
+          toast(`已添加：${name}，已上传 ${upData.saved} 张照片，正在后台提取特征...`, 'ok');
+        } else {
+          toast(`已添加：${name}（照片上传失败，请在人脸录入页补充）`, 'warn');
+        }
       }
     } else {
       toast(`已添加：${name}（未上传照片，请在人脸录入页录入人脸并提取特征）`);

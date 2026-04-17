@@ -774,6 +774,60 @@ def upload_photo(name):
 
     return jsonify(ok=True, saved=saved, total=total)
 
+@app.route('/api/persons/check_photos_faces', methods=['POST'])
+def check_photos_faces():
+    """
+    检测上传的照片中是否含有人脸。
+    接收 multipart/form-data 中的 photos 字段（可多张）。
+    返回每张照片的检测结果：{filename, has_face, face_count}
+    """
+    if 'photos' not in request.files:
+        return jsonify(ok=False, msg="未收到照片文件"), 400
+
+    load_dlib()  # 懒加载 dlib 模型
+    files = request.files.getlist('photos')
+    results = []
+
+    for file in files:
+        if not file or not file.filename:
+            continue
+        try:
+            file_bytes = file.read()
+            np_arr = np.frombuffer(file_bytes, dtype=np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if img is None:
+                results.append({
+                    "filename": file.filename,
+                    "has_face": False,
+                    "face_count": 0,
+                    "error": "无法解码图片"
+                })
+                continue
+            faces = _detector(img, 1)
+            results.append({
+                "filename": file.filename,
+                "has_face": len(faces) > 0,
+                "face_count": len(faces)
+            })
+        except Exception as e:
+            results.append({
+                "filename": file.filename,
+                "has_face": False,
+                "face_count": 0,
+                "error": str(e)
+            })
+
+    no_face_count = sum(1 for r in results if not r["has_face"])
+    has_face_count = sum(1 for r in results if r["has_face"])
+
+    return jsonify(
+        ok=True,
+        results=results,
+        total=len(results),
+        has_face_count=has_face_count,
+        no_face_count=no_face_count
+    )
+
 @app.route('/api/persons/photos/<name>/<filename>')
 def serve_photo(name, filename):
     folder = os.path.join(FACES_DIR, f"person_{name}")
