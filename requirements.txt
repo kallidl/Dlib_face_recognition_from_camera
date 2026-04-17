@@ -1,5 +1,0 @@
-dlib
-numpy
-scikit-image
-pandas
-opencv-python
