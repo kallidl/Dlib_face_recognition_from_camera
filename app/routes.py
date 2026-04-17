@@ -245,13 +245,27 @@ class CameraState:
         self.known_features  = []
         self.known_names     = []
         self.camera_id       = 0
-        # 识别结果共享区（读帧线程读，识别线程写）
-        self._display_results      = {}
-        self._display_results_lock = threading.Lock()
+        # OT 质心追踪状态
+        self.last_frame_face_centroid_list    = []
+        self.current_frame_face_centroid_list = []
+        self.last_frame_face_name_list        = []
+        self.current_frame_face_name_list     = []
+        self.last_frame_face_cnt              = 0
+        self.current_frame_face_cnt           = 0
+        self.reclassify_interval_cnt          = 0
+        self.reclassify_interval              = 10  # 每10帧强制重识别一次
 
     def load_features(self):
         self.known_features, self.known_names = [], []
-        self.detected_names = []
+        # 同时重置OT追踪状态，防止旧名字残留
+        self.last_frame_face_centroid_list    = []
+        self.current_frame_face_centroid_list = []
+        self.last_frame_face_name_list        = []
+        self.current_frame_face_name_list     = []
+        self.last_frame_face_cnt              = 0
+        self.current_frame_face_cnt           = 0
+        self.reclassify_interval_cnt          = 0
+        self.detected_names                   = []
 
         csv_path = os.path.join(BASE_DIR, "data", "features_all.csv")
         if not os.path.exists(csv_path):
@@ -284,6 +298,16 @@ class CameraState:
         idx   = dists.index(min_d)
         name  = str(self.known_names[idx]) if min_d < 0.4 else "unknown"
         return name, min_d
+
+    def centroid_tracker(self):
+        """OT质心追踪：用上一帧质心匹配当前帧人脸，复用上帧识别结果"""
+        for i in range(len(self.current_frame_face_centroid_list)):
+            dists = [
+                self.euclid(self.current_frame_face_centroid_list[i], last_c)
+                for last_c in self.last_frame_face_centroid_list
+            ]
+            best = dists.index(min(dists))
+            self.current_frame_face_name_list[i] = self.last_frame_face_name_list[best]
 
 CAM = CameraState()
 
@@ -366,28 +390,18 @@ def _gen_register_frames():
 
 
 # ─────────────────────────────────────────
-# ✅ 修复2：识别摄像头卡顿
+# 识别摄像头主循环（OT质心追踪方案，与app.py保持一致）
 #
-# 根本原因：原来单线程同时做"读帧→编码"和"等待dlib识别结果"
-#   dlib特征提取耗时100~500ms，这期间主循环阻塞，current_frame不更新
-#   导致视频流每隔约1~2秒冻结一次
+# 核心逻辑：
+#   场景1：人脸数不变 且 未到重识别间隔 → 只做dlib检测(快)+质心追踪，复用上帧名字，不调特征提取
+#   场景2：人脸数变化 或 到达重识别间隔 → 完整识别（检测+特征提取+比对），耗时但频率极低
 #
-# 解决方案：读帧和识别完全分离到两个独立线程
-#   线程A（_frame_reader_loop）：专门读帧+编码+更新current_frame，永不阻塞
-#   线程B（_recognition_loop）：定时取原始帧做dlib识别，慢不影响画面
+# 效果：识别到人之后绝大多数帧走场景1，dlib特征提取(100~500ms)极少触发，画面流畅不卡顿。
 # ─────────────────────────────────────────
-
-# 原始帧共享区（读帧线程写，识别线程读）
-_raw_frame_lock = threading.Lock()
-_raw_frame_data = {"frame": None, "seq": 0}
-
-
-def _frame_reader_loop():
-    """
-    读帧线程：以最快速度读摄像头帧，编码后存入 current_frame。
-    利用上一次识别结果叠加人脸框，不做任何dlib操作，永不阻塞。
-    """
-    cam = CAM.cap
+def _camera_loop():
+    load_dlib()
+    CAM.load_features()
+    cam_id = CAM.cap
 
     try:
         font_path = os.path.join(BASE_DIR, "static", "fonts", "simsun.ttc")
@@ -395,33 +409,99 @@ def _frame_reader_loop():
     except Exception:
         font_ch = None
 
-    seq = 0
-    while CAM.running and cam.isOpened():
-        ok, frame = cam.read()
+    COOLDOWN = {}  # {name: last_log_time}
+
+    while CAM.running and cam_id.isOpened():
+        ok, frame = cam_id.read()
         if not ok:
-            time.sleep(0.005)
-            continue
+            break
 
-        seq += 1
-        # 更新原始帧供识别线程取用
-        with _raw_frame_lock:
-            _raw_frame_data["frame"] = frame.copy()
-            _raw_frame_data["seq"]   = seq
+        faces = _detector(frame, 0)
 
-        # 读取上一次识别结果用于绘制（不等待，即时使用）
-        with CAM._display_results_lock:
-            cur_results = dict(CAM._display_results)
+        # 先保存上帧数，再更新当前帧数
+        CAM.last_frame_face_cnt    = CAM.current_frame_face_cnt
+        CAM.current_frame_face_cnt = len(faces)
 
+        # 保存上帧列表，清空当前帧质心列表
+        CAM.last_frame_face_name_list        = CAM.current_frame_face_name_list[:]
+        CAM.last_frame_face_centroid_list     = CAM.current_frame_face_centroid_list[:]
+        CAM.current_frame_face_centroid_list  = []
+
+        # ── 场景1：人脸数不变 且 不需要重识别 ──
+        # 只做质心追踪，复用上帧名字，不调 compute_face_descriptor，耗时 < 5ms
+        if (CAM.current_frame_face_cnt == CAM.last_frame_face_cnt and
+                CAM.reclassify_interval_cnt != CAM.reclassify_interval):
+
+            if "unknown" in CAM.current_frame_face_name_list:
+                CAM.reclassify_interval_cnt += 1
+
+            if CAM.current_frame_face_cnt != 0:
+                for d in faces:
+                    CAM.current_frame_face_centroid_list.append(
+                        [(d.left() + d.right()) / 2, (d.top() + d.bottom()) / 2]
+                    )
+                # 多人脸时用质心追踪重新对应名字（单人脸直接继承，不需要）
+                if CAM.current_frame_face_cnt != 1:
+                    CAM.centroid_tracker()
+
+        # ── 场景2：人脸数变化 或 到达重识别间隔 ──
+        # 完整识别，耗时较高，但只在人脸数变化或每10帧触发一次
+        else:
+            CAM.reclassify_interval_cnt = 0
+
+            if CAM.current_frame_face_cnt == 0:
+                CAM.current_frame_face_name_list = []
+                CAM.detected_names = []
+            else:
+                CAM.current_frame_face_name_list = []
+                names_with_dist = []
+
+                face_features = []
+                for face in faces:
+                    CAM.current_frame_face_centroid_list.append(
+                        [(face.left() + face.right()) / 2, (face.top() + face.bottom()) / 2]
+                    )
+                    shape = _predictor(frame, face)
+                    feat  = _reco_model.compute_face_descriptor(frame, shape)
+                    face_features.append(feat)
+                    CAM.current_frame_face_name_list.append("unknown")
+
+                for k, feat in enumerate(face_features):
+                    name, dist = CAM.recognize(feat)
+                    CAM.current_frame_face_name_list[k] = name
+                    names_with_dist.append({"name": name, "e_dist": round(dist, 4)})
+
+                    if name != "unknown":
+                        now = time.time()
+                        if now - COOLDOWN.get(name, 0) > 60:
+                            ts   = time.strftime("%Y%m%d_%H%M%S")
+                            snap = os.path.join(SNAPSHOT_DIR, f"{name}_{ts}.jpg")
+                            frame_copy = frame.copy()
+                            threading.Thread(
+                                target=lambda p=snap, f=frame_copy: safe_imwrite(p, f),
+                                daemon=True).start()
+                            add_recognition_log(name, round(dist, 4), CAM.camera_id, snap)
+                            COOLDOWN[name] = now
+
+                CAM.detected_names = names_with_dist
+
+        # 场景1追踪后同步 detected_names（保留已有的 e_dist）
+        if (CAM.current_frame_face_cnt != 0 and
+                len(CAM.current_frame_face_name_list) == CAM.current_frame_face_cnt):
+            CAM.detected_names = [
+                {"name": CAM.current_frame_face_name_list[i],
+                 "e_dist": CAM.detected_names[i].get("e_dist", 0)
+                           if i < len(CAM.detected_names) else 0}
+                for i in range(CAM.current_frame_face_cnt)
+            ]
+
+        # ── 绘制 ──
         draw_frame = frame.copy()
-
-        for fi, info in cur_results.items():
-            d     = info.get("rect")
-            if d is None:
-                continue
-            name  = info.get("name", "unknown")
+        for i, d in enumerate(faces):
+            name  = (CAM.current_frame_face_name_list[i]
+                     if i < len(CAM.current_frame_face_name_list) else "unknown")
             color = (0, 255, 128) if name != "unknown" else (80, 80, 255)
-            cv2.rectangle(draw_frame,
-                          (d.left(), d.top()), (d.right(), d.bottom()), color, 2)
+            cv2.rectangle(draw_frame, (d.left(), d.top()), (d.right(), d.bottom()), color, 2)
             sz = 12
             for ddx, ddy in [(-1, -1), (1, -1), (1, 1), (-1, 1)]:
                 cx = d.right() if ddx == 1 else d.left()
@@ -438,102 +518,16 @@ def _frame_reader_loop():
                 cv2.putText(draw_frame, name, (d.left(), d.bottom() + 22),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 1)
 
-        face_cnt = len(cur_results)
-        cv2.putText(draw_frame, f"Faces: {face_cnt}", (14, 28),
+        cv2.putText(draw_frame, f"Faces: {CAM.current_frame_face_cnt}", (14, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 128), 1)
 
         _, buf = cv2.imencode('.jpg', draw_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         with CAM.lock:
             CAM.current_frame = buf.tobytes()
-            CAM.face_count    = face_cnt
+            CAM.face_count    = CAM.current_frame_face_cnt
 
-    cam.release()
+    cam_id.release()
     CAM.running = False
-
-
-def _recognition_loop():
-    """
-    识别线程：每隔 RECLASSIFY_INTERVAL 秒取最新原始帧做一次完整识别。
-    dlib耗时全在本线程消化，不影响读帧线程和视频流流畅度。
-    """
-    COOLDOWN = {}
-    last_seq  = -1
-    # 识别间隔（秒）：0.8秒识别一次。可按需调小（更实时）或调大（更省CPU）
-    RECLASSIFY_INTERVAL = 0.8
-
-    while CAM.running:
-        time.sleep(RECLASSIFY_INTERVAL)
-
-        if not CAM.running:
-            break
-
-        with _raw_frame_lock:
-            frame = _raw_frame_data.get("frame")
-            seq   = _raw_frame_data.get("seq", 0)
-
-        if frame is None or seq == last_seq:
-            continue
-        last_seq = seq
-
-        try:
-            faces = _detector(frame, 0)
-        except Exception:
-            continue
-
-        if len(faces) == 0:
-            with CAM._display_results_lock:
-                CAM._display_results.clear()
-            CAM.detected_names = []
-            continue
-
-        new_results    = {}
-        detected_for_api = []
-
-        for fi, d in enumerate(faces):
-            try:
-                shape = _predictor(frame, d)
-                feat  = _reco_model.compute_face_descriptor(frame, shape)
-                name, dist = CAM.recognize(feat)
-            except Exception:
-                name, dist = "unknown", 9999.0
-
-            new_results[fi] = {
-                "name":   name,
-                "e_dist": round(dist, 4),
-                "rect":   d,   # dlib rect，供读帧线程绘制框用
-            }
-            detected_for_api.append({"name": name, "e_dist": round(dist, 4)})
-
-            # 写识别日志（带60秒冷却，同一人不重复写）
-            if name != "unknown":
-                now = time.time()
-                if now - COOLDOWN.get(name, 0) > 60:
-                    ts   = time.strftime("%Y%m%d_%H%M%S")
-                    snap = os.path.join(SNAPSHOT_DIR, f"{name}_{ts}.jpg")
-                    frame_copy = frame.copy()
-                    threading.Thread(
-                        target=lambda p=snap, f=frame_copy: safe_imwrite(p, f),
-                        daemon=True).start()
-                    add_recognition_log(name, round(dist, 4), CAM.camera_id, snap)
-                    COOLDOWN[name] = now
-
-        with CAM._display_results_lock:
-            CAM._display_results.clear()
-            CAM._display_results.update(new_results)
-        CAM.detected_names = detected_for_api
-
-
-def _camera_loop():
-    """启动识别摄像头：读帧线程 + 识别线程分离"""
-    load_dlib()
-    CAM.load_features()
-
-    # 启动识别线程
-    recog_t = threading.Thread(target=_recognition_loop, daemon=True)
-    recog_t.start()
-
-    # 主线程跑读帧循环（阻塞）
-    _frame_reader_loop()
 
 
 def _gen_frames():
